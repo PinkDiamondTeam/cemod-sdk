@@ -1,0 +1,112 @@
+# cemod-sdk
+
+Reusable build / verify / package toolchain for Wii U `trusted_native`
+`.cemod` mods, extracted from `mcwiiu-client-template`. It provides:
+
+- PowerPC ET_DYN codegen flags and link script (`config/link.ld`) for the
+  CemuExtend trusted-native ABI (bootstrap `.cemod.bootstrap` / CMB1 section,
+  malloc `--wrap=` set, `-fshort-wchar`, no-writable-executable segments).
+- `.cemod` packaging (`tools/package_cemod.py`) and verification
+  (`tools/verify_cemod.py`, `tools/normalize_relocations.py`).
+- A reproducible Docker build (`infra/docker/`) that vendors a
+  codecave-safe, short-`wchar_t` devkitPPC/newlib/libstdc++ toolchain.
+- `cemod.mk`: a GNU Make include that wires all of the above into a
+  consuming project's Makefile.
+
+Project-specific things (game hook addresses, CMB1 records, source, manifest
+contents) stay in the consuming project. Notably `startup.h`'s bootstrap
+entry stub is **not** in this SDK: its CMB1 records encode a specific game's
+hooked instruction address/CRC/handler, so it is inherently per-project; see
+`mcwiiu-client-template/include/code/startup.h` for the reference shape this
+SDK's `config/link.ld` expects (a `.cemod.bootstrap` section built with the
+`CMB1` header format checked by `tools/verify_cemod.py`).
+
+## Usage
+
+```make
+MAKEFILE_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+PROJECT_ROOT := $(patsubst %/,%,$(MAKEFILE_DIR))
+
+CEMOD_SDK_ROOT ?= $(PROJECT_ROOT)/../cemod-sdk
+CEMOD_NAME     := mcwiiu-client
+CEMOD_SOURCES  := src
+CEMOD_MANIFEST := $(PROJECT_ROOT)/manifest.json
+
+include $(CEMOD_SDK_ROOT)/cemod.mk
+```
+
+**Set every `CEMOD_*` variable before the `include` line.** GNU Make expands
+`wildcard()`/`foreach()` calls and rule prerequisites as it parses each
+line, so `cemod.mk`'s object-file discovery and link rules need their
+inputs to already hold final values when they are read. Order-independent
+things like `-D`/`-I` flag lists have `CEMOD_EXTRA_*` hooks (below) that
+help third-party `*.mk` snippets (which commonly do `INCLUDES += ...`
+against the plain `INCLUDES`/`SOURCES`/`DATA` names) merge in without extra
+plumbing -- `cemod.mk` merges those names into `CEMOD_INCLUDES`/
+`CEMOD_SOURCES`/`CEMOD_DATA` instead of overwriting them, so such helpers
+may be included either before or after `cemod.mk`.
+
+### Variable reference
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PROJECT_ROOT` | *(required)* | Absolute path to the consuming project |
+| `CEMOD_NAME` | *(required)* | Mod id / output file base name (`out/dist/$(CEMOD_NAME).cemod`) |
+| `CEMOD_SOURCES` | `src` | Source directories (space-separated, project-root-relative or absolute) |
+| `CEMOD_INCLUDES` | `include` | Extra include directories |
+| `CEMOD_DATA` | *(empty)* | Directories with embedded binary assets (`.png`/`.ttf`/`.gsh`/...) |
+| `CEMOD_MANIFEST` | `$(PROJECT_ROOT)/manifest.json` | Path to `manifest.json` |
+| `CEMOD_TARGET` | `$(CEMOD_NAME)` | ELF/target base name, if different from the mod name |
+| `CEMOD_PROJECT_MAKEFILE` | `$(PROJECT_ROOT)/Makefile` | Makefile re-invoked for the recursive object-build pass |
+| `CEMOD_EXTRA_DEFINES` | *(empty)* | Extra `-D` flags (both C and C++) |
+| `CEMOD_EXTRA_CFLAGS` / `CEMOD_EXTRA_CXXFLAGS` | *(empty)* | Extra compiler flags |
+| `CEMOD_EXTRA_LDFLAGS` | *(empty)* | Extra linker flags |
+| `CEMOD_EXTRA_LIBS_GROUP` | *(empty)* | Extra libs inside the `--start-group`/`--end-group` |
+| `CEMOD_EXTRA_LIBS` | *(empty)* | Extra libs outside the group |
+| `CEMOD_EXTRA_LIBDIRS` | *(empty)* | Extra `-L`-style library root directories |
+| `CEMOD_EXCLUDE_CPPFILES` | *(empty)* | `.cpp` basenames to exclude from the auto-discovered source list |
+| `CEMOD_EXTRA_BUILD_DEPS` | *(empty)* | Extra prerequisites for the object-build recursion (e.g. a runtime archive target) |
+| `CEMOD_EXTRA_ELF_DEPS` | *(empty)* | Extra order-only prerequisites for the final `.elf` link |
+| `CEMOD_STDLIB_ROOT` | `$(DEVKITPRO)/mcwiiu-stdlib` | Short-`wchar_t` newlib/libstdc++ prefix |
+| `CEMOD_STDLIB_VERSION` | `14.2.0` | GCC/libstdc++ version under `CEMOD_STDLIB_ROOT` |
+| `CEMOD_STDLIB_ROOT_PATH` | `/vol/external01/$(CEMOD_NAME)` | On-console path baked into `-DMCWIIU_STDLIB_ROOT` |
+| `CEMOD_STDLIB_SELF_TEST` | `0` | `-DSTDLIB_SELF_TEST=` value |
+| `CEMOD_GCC` | `$(DEVKITPRO)/mcwiiu-gcc` | Codecave-safe GCC prefix (built by `infra/docker/build-short-wchar-stdlib.sh`) |
+| `USE_SYSTEM_STDLIB` | *(unset)* | `1` uses the stock devkitPPC stdlib for linker bring-up only; `verify-wchar`/`make package` reject it |
+| `DEVKITPPC` / `DEVKITPRO` | *(required, from env)* | Standard devkitPro locations |
+
+### Targets
+
+`build`, `all` (build the ELF), `package` (build + package + verify),
+`verify-package`, `verify-wchar`, `install` (copy into `$(CEMU_DATA_DIR)`),
+`clean`, `print-project-config`, and `docker-build` / `docker-install`
+(build inside Docker; see below). Target names and behavior are unchanged
+from the original `mcwiiu-client-template/Makefile`.
+
+## Docker build
+
+`docker-build` / `docker-install` do not require a local devkitPPC
+checkout -- the toolchain lives entirely in the Docker image built from
+`infra/docker/Dockerfile`. A consuming project needs:
+
+- `compose.yaml` with a `builder` service whose `build.dockerfile` points at
+  `${CEMOD_SDK_ROOT}/infra/docker/Dockerfile` and whose
+  `build.additional_contexts` maps `sdk: ${CEMOD_SDK_ROOT}/infra/docker`
+  (BuildKit's multi-context COPY, so the stdlib build script/patch don't
+  need to be duplicated into every project).
+- A `volumes` entry bind-mounting `${CEMOD_SDK_ROOT}:${CEMOD_SDK_ROOT}:ro`
+  in addition to the project root, so the in-container `make` invocation
+  can `include $(CEMOD_SDK_ROOT)/cemod.mk` at the same absolute path as on
+  the host.
+- A vendored devkitPPC archive under the project (`infra/docker/vendor/devkitPPC/`,
+  referenced via `DEVKITPPC_ARCHIVE`/`DEVKITPPC_SHA256`), since that's a
+  large binary better kept per-project/cache than duplicated in the SDK.
+- A host-side entry point (see `mcwiiu-client-template/docker-build.sh`)
+  that exports `PROJECT_ROOT`, `CEMOD_SDK_ROOT`, `DEVKITPPC_ARCHIVE`,
+  `DEVKITPPC_SHA256`, and optionally `CEMOD_PREBUILD_CHECK` (a script for
+  project-specific preflight checks) and `CEMOD_EXTRA_VERIFY` (extra `make`
+  targets run in-container before packaging, e.g. a project's own SDK
+  header smoke test), then runs `infra/docker/docker-build.sh`.
+
+See `mcwiiu-client-template/{compose.yaml,docker-build.sh,infra/docker/prebuild-check.sh}`
+for the reference wiring.
