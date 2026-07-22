@@ -83,6 +83,12 @@ may be included either before or after `cemod.mk`.
 (build inside Docker; see below). Target names and behavior are unchanged
 from the original `mcwiiu-client-template/Makefile`.
 
+Both `make install CEMU_DATA_DIR=/path/to/Cemu` and the Docker install flow
+delegate to `infra/docker/install-cemu-pack.sh`. The shared installer validates
+the package before replacing `cemuextend/mods/<CEMOD_NAME>.cemod`. When the
+Docker flow is used without an explicit directory, it defaults to
+`${XDG_DATA_HOME:-$HOME/.local/share}/Cemu`.
+
 ## Docker build
 
 `docker-build` / `docker-install` do not require a local devkitPPC
@@ -110,3 +116,8 @@ checkout -- the toolchain lives entirely in the Docker image built from
 
 See `mcwiiu-client-template/{compose.yaml,docker-build.sh,infra/docker/prebuild-check.sh}`
 for the reference wiring.
+
+```sh
+./docker-build.sh --install
+./docker-build.sh --install /path/to/Cemu
+```

@@ -22,6 +22,29 @@ set -eu
 : "${DEVKITPPC_ARCHIVE:?DEVKITPPC_ARCHIVE must be set}"
 : "${DEVKITPPC_SHA256:?DEVKITPPC_SHA256 must be set}"
 
+install_cemu=0
+install_path=
+case "${1:-}" in
+  "")
+    if [ "$#" -ne 0 ]; then
+      echo "Usage: $0 [--install [Cemu data directory]]" >&2
+      exit 2
+    fi
+    ;;
+  --install)
+    install_cemu=1
+    install_path=${2:-}
+    if [ "$#" -gt 2 ]; then
+      echo "Usage: $0 [--install [Cemu data directory]]" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "Usage: $0 [--install [Cemu data directory]]" >&2
+    exit 2
+    ;;
+esac
+
 cd "$PROJECT_ROOT"
 
 command -v docker >/dev/null 2>&1 || { echo "Docker is required." >&2; exit 1; }
@@ -51,10 +74,6 @@ export DEVKITPPC_SHA256
 docker compose build
 docker compose run --rm builder
 
-if [ "${1:-}" = "--install" ]; then
-  if [ "$#" -gt 2 ]; then
-    echo "Usage: $0 --install [Cemu data directory]" >&2
-    exit 2
-  fi
-  sh "$CEMOD_SDK_ROOT/infra/docker/install-cemu-pack.sh" "${2:-}"
+if [ "$install_cemu" -eq 1 ]; then
+  sh "$CEMOD_SDK_ROOT/infra/docker/install-cemu-pack.sh" "$install_path"
 fi

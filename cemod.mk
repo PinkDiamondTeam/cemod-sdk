@@ -274,8 +274,8 @@ verify-package:
 
 install: package
 	@test -n "$(CEMU_DATA_DIR)" || { echo 'Set CEMU_DATA_DIR to the Cemu data directory.' >&2; exit 1; }
-	@mkdir -p "$(CEMU_DATA_DIR)/cemuextend/mods"
-	@cp "$(PACKAGE_PATH)" "$(CEMU_DATA_DIR)/cemuextend/mods/$(CEMOD_NAME).cemod"
+	@PROJECT_ROOT="$(PROJECT_ROOT)" CEMOD_NAME="$(CEMOD_NAME)" \
+		sh "$(CEMOD_SDK_ROOT)/infra/docker/install-cemu-pack.sh" "$(CEMU_DATA_DIR)"
 
 ifeq ($(USE_SYSTEM_STDLIB),)
 $(BUILD): $(STDLIB_ROOT)/.wchar16
