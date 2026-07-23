@@ -1,0 +1,21 @@
+{
+  "package_version": 2,
+  "api_version": 2,
+  "execution_mode": "trusted_native",
+  "payload": {"format": "wups", "path": "plugin.wps"},
+  "mod_id": "org.example.golden",
+  "title_ids": ["0005000012345678"],
+  "requested_permissions": [],
+  "scope": {"type": "process", "targets": ["game"]},
+  "permissions": {
+    "native_memory": true,
+    "function_patching": true,
+    "physical_address_patching": false,
+    "filesystem": {"read": true, "write": false},
+    "network": false,
+    "mapped_memory": true,
+    "notifications": true,
+    "content_redirection": false,
+    "modules": ["homebrew_functionpatcher", "homebrew_mappedmemory"]
+  }
+}

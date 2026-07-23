@@ -21,6 +21,8 @@ from typing import Any
 MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
 MAX_EXPANDED_BYTES = 64 * 1024 * 1024
 MAX_PAYLOAD_BYTES = 64 * 1024 * 1024
+MAX_MANIFEST_BYTES = 256 * 1024
+MAX_TRUSTED_ELF_BYTES = 8 * 1024 * 1024
 MAX_COMPRESSION_RATIO = 200
 MAX_SECTIONS = 512
 ALLOWED_ENTRIES = {
@@ -66,6 +68,30 @@ def _identifier(value: str, maximum: int = 128) -> bool:
         re.fullmatch(r"[A-Za-z0-9_.-]+", value) is not None
 
 
+def _safe_text(value: str, maximum: int) -> bool:
+    return isinstance(value, str) and 0 < len(value) <= maximum and all(
+        character >= " " or character in "\t\n\r" for character in value
+    )
+
+
+def _parse_wups_version(value: str) -> tuple[int, int, int] | None:
+    if not isinstance(value, str):
+        return None
+    parts = value.split(".")
+    if len(parts) != 3 or any(re.fullmatch(r"[0-9]+", part) is None for part in parts):
+        return None
+    parsed = tuple(int(part) for part in parts)
+    return parsed if all(part <= 0xFFFF for part in parsed) else None
+
+
+def _uint(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"invalid JSON constant {value}")
+
+
 def _normalize_entry(name: str) -> str:
     if not name or len(name) > 255 or "\\" in name or "\0" in name or name.startswith("/"):
         raise CemodError("package contains an unsafe entry name")
@@ -89,7 +115,8 @@ def validate_manifest(manifest: dict[str, Any]) -> tuple[str, str]:
     if not isinstance(manifest, dict):
         raise CemodError("manifest.json must contain an object")
     package_version = manifest.get("package_version")
-    if package_version not in (1, 2) or manifest.get("api_version") != 2:
+    if (isinstance(package_version, bool) or package_version not in (1, 2) or
+            isinstance(manifest.get("api_version"), bool) or manifest.get("api_version") != 2):
         raise CemodError("manifest requires package_version 1 or 2 and api_version 2")
     if manifest.get("execution_mode") not in ("isolated", "trusted_native"):
         raise CemodError("execution_mode must be isolated or trusted_native")
@@ -100,14 +127,21 @@ def validate_manifest(manifest: dict[str, Any]) -> tuple[str, str]:
         raise CemodError("title_ids must be a non-empty array")
     for title in title_ids:
         try:
-            parsed = title if isinstance(title, int) and not isinstance(title, bool) else int(title, 16)
+            if _uint(title):
+                parsed = title
+            elif (isinstance(title, str) and len(title) <= 18 and
+                    re.fullmatch(r"(?:0[xX])?[0-9a-fA-F]+", title)):
+                parsed = int(title, 16)
+            else:
+                raise ValueError
         except (TypeError, ValueError):
             raise CemodError("title_ids contains an invalid title ID") from None
         if not 0 < parsed <= 0xFFFFFFFFFFFFFFFF:
             raise CemodError("title_ids contains an invalid title ID")
     requested = manifest.get("requested_permissions")
-    if not isinstance(requested, list) or len(requested) != len(set(requested)) or \
-            any(value not in {"read", "write", "inject", "clipboard", "capture"} for value in requested):
+    if (not isinstance(requested, list) or any(not isinstance(value, str) for value in requested) or
+            len(requested) != len(set(requested)) or
+            any(value not in {"read", "write", "inject", "clipboard", "capture"} for value in requested)):
         raise CemodError("requested_permissions is invalid")
 
     if package_version == 1:
@@ -137,7 +171,8 @@ def validate_manifest(manifest: dict[str, Any]) -> tuple[str, str]:
                 targets = scope.get("targets")
                 allowed = set(PROCESS_TARGET_NAMES.values())
                 if set(scope) != {"type", "targets"} or not isinstance(targets, list) or \
-                        not targets or len(targets) != len(set(targets)) or any(value not in allowed for value in targets):
+                        not targets or len(targets) > 16 or any(not isinstance(value, str) for value in targets) or \
+                        len(targets) != len(set(targets)) or any(value not in allowed for value in targets):
                     raise CemodError("process scope targets are invalid")
 
         permissions = manifest.get("permissions")
@@ -159,6 +194,7 @@ def validate_manifest(manifest: dict[str, Any]) -> tuple[str, str]:
                 raise CemodError("permissions.filesystem is invalid")
             modules = permissions.get("modules")
             if modules is not None and (not isinstance(modules, list) or len(modules) > 64 or
+                    any(not isinstance(value, str) for value in modules) or
                     len(modules) != len(set(modules)) or any(not _identifier(value) for value in modules)):
                 raise CemodError("permissions.modules is invalid")
 
@@ -167,8 +203,23 @@ def validate_manifest(manifest: dict[str, Any]) -> tuple[str, str]:
     if manifest["execution_mode"] == "trusted_native":
         if any(name in manifest for name in ("memory", "cpu", "entrypoint")):
             raise CemodError("trusted_native manifest contains isolated-only fields")
-    elif not all(name in manifest for name in ("memory", "cpu", "entrypoint")):
-        raise CemodError("isolated manifest is missing memory, cpu, or entrypoint")
+    else:
+        if not all(name in manifest for name in ("memory", "cpu", "entrypoint")):
+            raise CemodError("isolated manifest is missing memory, cpu, or entrypoint")
+        memory, cpu = manifest["memory"], manifest["cpu"]
+        required_memory = ("code_bytes", "private_bytes", "stack_bytes")
+        required_cpu = ("instructions_per_frame", "time_us_per_frame")
+        if (not isinstance(memory, dict) or not isinstance(cpu, dict) or
+                any(not _uint(memory.get(name)) for name in required_memory) or
+                any(not _uint(cpu.get(name)) for name in required_cpu) or
+                manifest["entrypoint"] != "cemod_init"):
+            raise CemodError("isolated manifest memory, cpu, or entrypoint is invalid")
+        if (not 0 < memory["code_bytes"] <= 16 * 1024 * 1024 or
+                not 0 < memory["private_bytes"] <= 32 * 1024 * 1024 or
+                not 0 < memory["stack_bytes"] <= 1 * 1024 * 1024 or
+                memory["stack_bytes"] % 4096 or not 0 < cpu["instructions_per_frame"] <= 1_000_000 or
+                not 0 < cpu["time_us_per_frame"] <= 1000):
+            raise CemodError("isolated manifest resource limits are invalid")
     return payload_format, payload_path
 
 
@@ -190,12 +241,139 @@ def _cstring(data: bytes, offset: int, maximum: int = 4096) -> str:
     if not 0 <= offset < len(data):
         raise CemodError("string offset is out of bounds")
     end = data.find(b"\0", offset, min(len(data), offset + maximum + 1))
-    if end < 0:
+    if end < 0 or end - offset > maximum:
         raise CemodError("string is not NUL-terminated")
     try:
         return data[offset:end].decode("utf-8")
     except UnicodeDecodeError:
         raise CemodError("string is not valid UTF-8") from None
+
+
+def validate_elf(elf: bytes) -> None:
+    """Validate the legacy trusted-native ELF without invoking host tools."""
+    if not 52 <= len(elf) <= MAX_TRUSTED_ELF_BYTES:
+        raise CemodError("PPC ELF has an invalid size")
+
+    def u16(offset: int) -> int:
+        return struct.unpack_from(">H", elf, offset)[0]
+
+    def u32(offset: int) -> int:
+        return struct.unpack_from(">I", elf, offset)[0]
+
+    if (elf[:4] != b"\x7fELF" or elf[4:7] != b"\x01\x02\x01" or u16(16) != 3 or
+            u16(18) != 20 or u32(20) != 1):
+        raise CemodError("mod.elf is not a 32-bit big-endian PowerPC ET_DYN image")
+    program_offset, section_offset = u32(28), u32(32)
+    program_size, program_count = u16(42), u16(44)
+    section_size, section_count, names_index = u16(46), u16(48), u16(50)
+    if (program_size < 32 or not program_count or program_count > 128 or
+            section_size < 40 or not section_count or section_count > 1024 or
+            names_index >= section_count or program_offset > len(elf) or
+            program_count * program_size > len(elf) - program_offset or
+            section_offset > len(elf) or section_count * section_size > len(elf) - section_offset):
+        raise CemodError("trusted ELF tables are out of bounds")
+
+    segments: list[tuple[int, int, int]] = []
+    code_bytes = data_bytes = 0
+    for index in range(program_count):
+        offset = program_offset + index * program_size
+        if u32(offset) != 1:
+            continue
+        file_offset, address = u32(offset + 4), u32(offset + 8)
+        file_size, memory_size, flags = u32(offset + 16), u32(offset + 20), u32(offset + 24)
+        if (file_size > memory_size or file_offset > len(elf) or
+                file_size > len(elf) - file_offset or flags & 3 == 3 or
+                address + memory_size > 0x100000000):
+            raise CemodError("PPC ELF contains an invalid or writable-executable segment")
+        for existing_address, existing_size, _ in segments:
+            if address < existing_address + existing_size and existing_address < address + memory_size:
+                raise CemodError("trusted ELF load segments overlap")
+        segments.append((address, memory_size, flags))
+        if flags & 1:
+            code_bytes += memory_size
+        else:
+            data_bytes += memory_size
+    if not segments or code_bytes == 0 or code_bytes + data_bytes > MAX_TRUSTED_ELF_BYTES:
+        raise CemodError("trusted ELF image exceeds the shared codecave")
+
+    def section(index: int) -> tuple[int, ...]:
+        return struct.unpack_from(">10I", elf, section_offset + index * section_size)
+
+    sections = [section(index) for index in range(section_count)]
+    names = sections[names_index]
+    if names[1] != 3 or names[4] > len(elf) or names[5] > len(elf) - names[4]:
+        raise CemodError("trusted ELF section-name table is invalid")
+    names_data = elf[names[4]:names[4] + names[5]]
+
+    def section_name(value: tuple[int, ...]) -> str:
+        if value[0] >= len(names_data):
+            raise CemodError("trusted ELF contains an invalid section name")
+        try:
+            end = names_data.index(0, value[0])
+        except ValueError:
+            raise CemodError("trusted ELF contains an invalid section name") from None
+        try:
+            return names_data[value[0]:end].decode("ascii")
+        except UnicodeDecodeError:
+            raise CemodError("trusted ELF contains an invalid section name") from None
+
+    names_by_index = [section_name(value) for value in sections]
+    if len(set(name for name in names_by_index if name)) != len([name for name in names_by_index if name]):
+        raise CemodError("trusted ELF contains duplicate section names")
+
+    def contains(address: int, size: int, executable: bool = False) -> bool:
+        return any((not executable or flags & 1) and address >= start and
+                   address - start <= region_size and size <= region_size - (address - start)
+                   for start, region_size, flags in segments)
+
+    for index, value in enumerate(sections):
+        kind, file_offset, size = value[1], value[4], value[5]
+        if kind != 8 and (file_offset > len(elf) or size > len(elf) - file_offset):
+            raise CemodError("trusted ELF section is out of bounds")
+        if kind == 9:
+            raise CemodError("trusted ELF must use RELA relocations")
+        if kind in (2, 11):
+            if value[9] < 16 or size % value[9] != 0:
+                raise CemodError("trusted ELF symbol table is invalid")
+            for symbol in range(1, size // value[9]):
+                symbol_offset = file_offset + symbol * value[9]
+                if struct.unpack_from(">H", elf, symbol_offset + 14)[0] == 0:
+                    raise CemodError("trusted ELF contains an undefined symbol")
+        if kind == 4:
+            if (value[9] < 12 or size % value[9] != 0 or value[6] >= section_count or
+                    sections[value[6]][1] not in (2, 11)):
+                raise CemodError("trusted ELF relocation table is invalid")
+            symbols = sections[value[6]]
+            if symbols[9] < 16 or symbols[5] % symbols[9] != 0:
+                raise CemodError("trusted ELF relocation symbol table is invalid")
+            for relocation in range(size // value[9]):
+                rel_offset = file_offset + relocation * value[9]
+                info = u32(rel_offset + 4)
+                kind_value, symbol_index = info & 0xFF, info >> 8
+                if kind_value not in {0, 1, 4, 5, 6, 10, 22, 26} or \
+                        symbol_index >= symbols[5] // symbols[9]:
+                    raise CemodError("trusted ELF contains an unsupported relocation")
+                width = 2 if kind_value in {4, 5, 6} else 4
+                if kind_value and not contains(u32(rel_offset), width):
+                    raise CemodError("trusted ELF relocation target is outside the image")
+
+    bootstrap = [index for index, name in enumerate(names_by_index) if name == ".cemod.bootstrap"]
+    if len(bootstrap) != 1:
+        raise CemodError("trusted ELF is missing or has duplicate .cemod.bootstrap sections")
+    value = sections[bootstrap[0]]
+    if (value[1] != 1 or not value[2] & 2 or value[5] < 12 or
+            not contains(value[3], value[5]) or value[4] + value[5] > len(elf) or
+            u32(value[4]) != 0x434D4231 or u16(value[4] + 4) != 1 or
+            u16(value[4] + 6) != 24):
+        raise CemodError("trusted ELF contains an invalid CMB1 bootstrap section")
+    count = u32(value[4] + 8)
+    if not 1 <= count <= 64 or value[5] != 12 + count * 24:
+        raise CemodError("trusted ELF contains an invalid CMB1 record count")
+    for record in range(count):
+        offset = value[4] + 12 + record * 24
+        if (u32(offset) == 0 or u32(offset + 4) & 3 or u32(offset + 12) != 0 or
+                u32(offset + 20) != 0 or not contains(u32(offset + 16), 4, True)):
+            raise CemodError("trusted ELF contains an invalid CMB1 record")
 
 
 def inspect_wups(image: bytes) -> dict[str, Any]:
@@ -248,14 +426,16 @@ def inspect_wups(image: bytes) -> dict[str, Any]:
                 if len(stored) < 5:
                     raise CemodError(f"compressed section {index} is truncated")
                 expanded_size = struct.unpack_from(">I", stored)[0]
+                if expanded_size == 0 or expanded_size > MAX_EXPANDED_BYTES:
+                    raise CemodError(f"compressed section {index} exceeds the expansion limit")
                 try:
                     decompressor = zlib.decompressobj()
                     data = decompressor.decompress(stored[4:], expanded_size)
                     data += decompressor.flush()
                 except zlib.error:
                     raise CemodError(f"compressed section {index} is invalid") from None
-                if len(data) != expanded_size or not decompressor.eof or \
-                        decompressor.unused_data or decompressor.unconsumed_tail:
+                if (len(data) != expanded_size or not decompressor.eof or \
+                        decompressor.unused_data or decompressor.unconsumed_tail):
                     raise CemodError(f"compressed section {index} has the wrong expanded size")
             else:
                 data = stored
@@ -354,22 +534,31 @@ def inspect_wups(image: bytes) -> dict[str, Any]:
             metadata_section["data"][-1] != 0:
         raise CemodError("missing or invalid .wups.meta")
     metadata: dict[str, str] = {}
-    for raw in metadata_section["data"].split(b"\0"):
-        if not raw or b"=" not in raw:
+    metadata_data = metadata_section["data"]
+    metadata_offset = 0
+    while metadata_offset < len(metadata_data):
+        raw = _cstring(metadata_data, metadata_offset, 4096)
+        metadata_offset += len(raw) + 1
+        if not raw or "=" not in raw:
             continue
         try:
-            key, value = raw.decode("utf-8").split("=", 1)
+            key, value = raw.split("=", 1)
         except UnicodeDecodeError:
             raise CemodError("metadata is not valid UTF-8") from None
         if not _identifier(key, 64) or len(value) > 4096 or key in metadata:
             raise CemodError(f"invalid or duplicate metadata key {key!r}")
         metadata[key] = value
-    if not metadata.get("name") or not metadata.get("wups"):
+    if not _safe_text(metadata.get("name", ""), 128) or not metadata.get("wups"):
         raise CemodError("required name or wups metadata is missing")
+    parsed_version = _parse_wups_version(metadata["wups"])
+    if parsed_version is None:
+        raise CemodError(f"plugin {metadata['name']!r} has malformed WUPS ABI version {metadata['wups']!r}")
     if metadata["wups"] not in SUPPORTED_WUPS_VERSIONS:
         raise CemodError(
             f"plugin {metadata['name']!r} uses unsupported WUPS ABI {metadata['wups']}; "
             f"supported: {', '.join(sorted(SUPPORTED_WUPS_VERSIONS))}")
+    if metadata.get("storage_id") and not _identifier(metadata["storage_id"], 128):
+        raise CemodError(".wups.meta storage_id is invalid")
     if metadata.get("debug") not in (None, "track_heap", "track_heap_with_stack_trace"):
         raise CemodError("metadata debug flag is invalid")
 
@@ -408,11 +597,15 @@ def inspect_wups(image: bytes) -> dict[str, Any]:
             fixed = bool(physical or virtual)
             if fixed != (library == 66):
                 raise CemodError("fixed-address replacement has an invalid library")
+            name = guest_string(name_ptr)
+            replacement_name = guest_string(replacement_ptr)
+            if not name or not replacement_name:
+                raise CemodError("invalid replacement descriptor name")
             replacements.append({
                 "entry_type": ("optional_function", "mandatory_function", "legacy_export")[kind],
                 "mandatory": kind == 1, "physical_address": physical,
-                "virtual_address": virtual, "name": guest_string(name_ptr), "library": library,
-                "replacement_name": guest_string(replacement_ptr), "target": target,
+                "virtual_address": virtual, "name": name, "library": library,
+                "replacement_name": replacement_name, "target": target,
                 "call_through_storage": call_addr, "process_target": process,
             })
             processes.add(process)
@@ -439,7 +632,8 @@ def inspect_wups(image: bytes) -> dict[str, Any]:
             import_section = sections[section_index]
             function = import_section["name"].startswith(".fimport_")
             data_import = import_section["name"].startswith(".dimport_")
-            if not (function or data_import) or (info & 0xF) != (2 if function else 1):
+            if not (function or data_import) or not name or \
+                    (info & 0xF) != (2 if function else 1):
                 raise CemodError(f"import {name!r} has wrong function/data type")
             module = import_section["name"][9:]
             if not _identifier(module, 64) or value < import_section["address"] or \
@@ -581,9 +775,11 @@ def read_package(path: pathlib.Path) -> PackageContents:
         raise CemodError(f"package is not a readable ZIP: {error}") from None
     if "manifest.json" not in entries:
         raise CemodError("package is missing manifest.json")
+    if len(entries["manifest.json"]) > MAX_MANIFEST_BYTES:
+        raise CemodError("manifest.json has an invalid size")
     try:
-        manifest = json.loads(entries["manifest.json"])
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        manifest = json.loads(entries["manifest.json"], parse_constant=_reject_json_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
         raise CemodError(f"manifest.json is malformed: {error}") from None
     payload_format, payload_path = validate_manifest(manifest)
     present = [name for name in ("mod.elf", "plugin.wps") if name in entries]
@@ -597,5 +793,9 @@ def read_package(path: pathlib.Path) -> PackageContents:
     payload = entries[payload_path]
     if not 0 < len(payload) <= MAX_PAYLOAD_BYTES:
         raise CemodError("payload size is invalid")
-    wups = inspect_wups(payload) if payload_format == "wups" else None
+    if payload_format == "wups":
+        wups = inspect_wups(payload)
+    else:
+        validate_elf(payload)
+        wups = None
     return PackageContents(manifest, payload_format, payload_path, payload, entries, wups)

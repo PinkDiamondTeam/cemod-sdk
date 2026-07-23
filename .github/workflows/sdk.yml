@@ -1,0 +1,21 @@
+name: cemod-sdk
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Python sources
+        run: python3 -m compileall -q tools tests
+      - name: Run unit, property, corpus, and signing tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Run corpus driver
+        run: |
+          for seed in tests/corpus/*; do
+            python3 tests/fuzz_driver.py "$seed"
+          done

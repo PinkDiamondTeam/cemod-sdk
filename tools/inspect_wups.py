@@ -45,7 +45,7 @@ def main() -> None:
         result = inspect_wups(args.wps.read_bytes())
         manifest = json.loads(args.manifest.read_text(encoding="utf-8")) if args.manifest else None
         result["permission_warnings"] = permission_warnings(result, manifest)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, CemodError) as error:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError, CemodError) as error:
         raise SystemExit(str(error)) from None
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))

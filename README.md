@@ -130,6 +130,32 @@ Run the SDK regression suite with:
 python3 -m unittest discover -s tests -v
 ```
 
+The suite runs a C++ cross-repository check automatically when the sibling
+`CemuExtend/build/nix/src/Cafe/wups_binary_tests` and
+`cemod_package_tests` binaries exist. Override their locations with
+`CEMUEXTEND_WUPS_BINARY` and `CEMUEXTEND_PACKAGE_BINARY`. The package test
+verifies that CemuExtend accepts the SDK's WPS fixture and Ed25519 package,
+including the canonical digest.
+
+For an externally built public plugin, run:
+
+```sh
+python3 tools/verify_wups.py --wps /path/to/plugin.wps
+python3 tools/inspect_wups.py --wps /path/to/plugin.wps --manifest manifest.json
+```
+
+`tests/fuzz_driver.py` is a dependency-free corpus smoke/fuzz entry point.
+The seeds under `tests/corpus/` are intentionally malformed and are expected
+to be rejected. See [docs/wups-support-design.md](docs/wups-support-design.md)
+for the binary contract, signature bytes, runtime boundary, and license
+boundary.
+
+The SDK does not execute guest PPC code and does not provide fake WUPS/WUMS
+success paths. WUPS lifecycle execution, guest callbacks, FunctionPatcher,
+WUMS module loading, Aroma HLE services, and GUI integration must be supplied
+by the Cemu runtime; an unsupported runtime capability remains an explicit
+compatibility error.
+
 ## Docker build
 
 `docker-build` / `docker-install` do not require a local devkitPPC

@@ -17,7 +17,8 @@ TOOLS = ROOT / "tools"
 sys.path.insert(0, str(TOOLS))
 
 from cemodlib import (  # noqa: E402
-    CemodError, canonical_signature_digest, inspect_wups, read_package, validate_manifest,
+    CemodError, canonical_signature_digest, inspect_wups, read_package, validate_elf,
+    validate_manifest,
 )
 from verify_cemod import verify_signature  # noqa: E402
 
@@ -50,13 +51,24 @@ def wps_image(metadata=b"name=SDK Test\0author=Test\0version=1.0\0license=MIT\0"
     sections = [
         ["", 0, 0, 0, 0, 0, 0, b""],
         [".text", 1, 2 | 4, 0x02000000, 0, 0, 4, b"\x4e\x80\x00\x20"],
-        [".wups.meta", 1, 2 | 1, 0x10000000, 0, 0, 4, metadata],
-        [".wups.hooks", 1, 2 | 1, 0x10001000, 0, 0, 4,
+        [".data", 1, 2 | 1, 0x10000000, 0, 0, 4,
+         b"OSReport\0" + b"\0" * 7 + b"my_OSReport\0" + b"\0" * 7 + b"\0" * 29],
+        [".wups.meta", 1, 2 | 1, 0x10000100, 0, 0, 4, metadata],
+        [".wups.hooks", 1, 2 | 1, 0x10000200, 0, 0, 4,
          struct.pack(">II", hook, 0x02000000)],
-        [".symtab", 2, 0, 0, 0, 0, 4, b"\0" * 16],
-        [".strtab", 3, 0, 0, 0, 0, 1, b"\0"],
+        [".wups.load", 1, 2 | 1, 0x10000300, 0, 0, 4,
+         struct.pack(">9I", 1, 0, 0, 0x10000000, 2, 0x10000010,
+                     0x02000000, 0x10000030, 16)],
+        [".fimport_coreinit", 0x80000002, 2 | 4, 0xC0000000, 0, 0, 16, b"\0" * 16],
+        [".rela.text", 4, 0, 0, 0, 1, 4, struct.pack(">III", 0x02000000, 0x00000101, 0)],
+        [".symtab", 2, 0, 0, 0, 0, 4, bytearray(32)],
+        [".strtab", 3, 0, 0, 0, 0, 1, b"\0OSReport\0"],
     ]
-    sections[4][4] = 5
+    sections[8][4] = 9
+    sections[7][4] = 8
+    struct.pack_into(">II", sections[8][7], 16, 1, 0xC0000000)
+    sections[8][7][28] = 0x12
+    struct.pack_into(">H", sections[8][7], 30, 6)
     names = bytearray(b"\0")
     name_offsets = []
     for section in sections:
@@ -95,9 +107,30 @@ def wps_image(metadata=b"name=SDK Test\0author=Test\0version=1.0\0license=MIT\0"
         struct.pack_into(">10I", image, table_offset + index * 40,
                          name_offsets[index], section[1], section[2], section[3], offsets[index],
                          len(section[7]), section[4], section[5], section[6],
-                         16 if section[1] == 2 else 0)
+                         16 if section[1] == 2 else (12 if section[1] == 4 else 0))
         if section[7]:
             image[offsets[index]:offsets[index] + len(section[7])] = section[7]
+    return bytes(image)
+
+
+def elf_image():
+    """Small valid CMB1 trusted-native ELF used by package-side validation."""
+    image = bytearray(0x300)
+    names = b"\0.shstrtab\0.cemod.bootstrap\0"
+    image[0:4] = b"\x7fELF"
+    image[4:7] = b"\x01\x02\x01"
+    struct.pack_into(">HHI", image, 16, 3, 20, 1)
+    struct.pack_into(">II", image, 28, 52, 0x280)
+    struct.pack_into(">HHHHHH", image, 40, 52, 32, 1, 40, 3, 1)
+    struct.pack_into(">8I", image, 52, 1, 0, 0x10000000, 0, len(image), 0x1000, 5, 0x1000)
+    image[0x100:0x100 + len(names)] = names
+    bootstrap = 0x180
+    struct.pack_into(">IHHI", image, bootstrap, 0x434D4231, 1, 24, 1)
+    struct.pack_into(">6I", image, bootstrap + 12, 1, 0x10000120, 0x4e800421,
+                     0, 0x10000120, 0)
+    struct.pack_into(">10I", image, 0x280, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    struct.pack_into(">10I", image, 0x2a8, 1, 3, 2, 0x10000000, 0x100, len(names), 0, 0, 1, 0)
+    struct.pack_into(">10I", image, 0x2d0, 11, 1, 2, 0x10000100, bootstrap, 36, 0, 0, 4, 0)
     return bytes(image)
 
 
@@ -135,6 +168,27 @@ class ManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(CemodError, "unknown payload"):
             validate_manifest(value)
 
+    def test_numeric_types_and_isolated_limits(self):
+        value = manifest()
+        value["package_version"] = True
+        with self.assertRaises(CemodError):
+            validate_manifest(value)
+        value = manifest()
+        value["scope"]["targets"] = ["game"] * 17
+        with self.assertRaises(CemodError):
+            validate_manifest(value)
+        value = manifest(1)
+        value["execution_mode"] = "isolated"
+        value.update({
+            "memory": {"code_bytes": 4096, "private_bytes": 4096, "stack_bytes": 4096},
+            "cpu": {"instructions_per_frame": 1000, "time_us_per_frame": 500},
+            "entrypoint": "cemod_init",
+        })
+        self.assertEqual(validate_manifest(value), ("cemod_elf", "mod.elf"))
+        value["entrypoint"] = "not_cemod_init"
+        with self.assertRaises(CemodError):
+            validate_manifest(value)
+
 
 class WupsTests(unittest.TestCase):
     def test_valid_inspection(self):
@@ -159,6 +213,10 @@ class WupsTests(unittest.TestCase):
             inspect_wups(wps_image(b"name=SDK Test\0wups=9.9.9\0"))
         with self.assertRaisesRegex(CemodError, "hook"):
             inspect_wups(wps_image(hook=99))
+        with self.assertRaisesRegex(CemodError, "malformed"):
+            inspect_wups(wps_image(b"name=SDK Test\0wups=0.9\0"))
+        with self.assertRaisesRegex(CemodError, "storage_id"):
+            inspect_wups(wps_image(b"name=SDK Test\0wups=0.9.1\0storage_id=../escape\0"))
 
 
 class PackageTests(unittest.TestCase):
@@ -191,6 +249,33 @@ class PackageTests(unittest.TestCase):
         ):
             with self.subTest(suffix=suffix), self.assertRaisesRegex(CemodError, "exactly"):
                 read_package(self.package(suffix, entries))
+
+    def test_legacy_elf_payload_and_malformed_elf(self):
+        value = manifest(1)
+        path = self.package("elf", [("manifest.json", json.dumps(value).encode()),
+                                     ("mod.elf", elf_image())])
+        result = read_package(path)
+        self.assertEqual(result.payload_format, "cemod_elf")
+        broken = bytearray(elf_image())
+        broken[0] = 0
+        with self.assertRaisesRegex(CemodError, "mod.elf"):
+            validate_elf(bytes(broken))
+
+    def test_deterministic_package_bytes(self):
+        manifest_path = self.root / "manifest.json"
+        wps_path = self.root / "plugin.wps"
+        golden_manifest = ROOT / "tests/fixtures/golden-manifest-v2.json"
+        manifest_path.write_text(golden_manifest.read_text(encoding="utf-8"), encoding="utf-8")
+        wps_path.write_bytes(self.wps)
+        first = self.root / "first.cemod"
+        second = self.root / "second.cemod"
+        command = [sys.executable, str(TOOLS / "package_cemod.py"), "--manifest", str(manifest_path),
+                   "--wps", str(wps_path), "--output"]
+        subprocess.run(command + [str(first)], check=True)
+        subprocess.run(command + [str(second)], check=True)
+        self.assertEqual(first.read_bytes(), second.read_bytes())
+        self.assertEqual(hashlib.sha256(first.read_bytes()).hexdigest(),
+                         "7da84075bc099ef9580078ab07cb8ea9f496e3d651eb27ddcc8ab18e63cfec8b")
 
     def test_unsafe_duplicate_and_unknown_entries(self):
         cases = {
@@ -263,6 +348,36 @@ class PackageTests(unittest.TestCase):
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.assertNotEqual(failed.returncode, 0)
         self.assertEqual(output_path.read_bytes(), original)
+
+    def test_cross_repo_cemu_extend_accepts_wps_and_signature(self):
+        wups_binary = os.environ.get("CEMUEXTEND_WUPS_BINARY")
+        if not wups_binary:
+            candidate = ROOT.parent / "CemuExtend" / "build/nix/src/Cafe/wups_binary_tests"
+            wups_binary = str(candidate) if candidate.exists() else None
+        if not wups_binary:
+            self.skipTest("set CEMUEXTEND_WUPS_BINARY to run the C++ WPS conformance test")
+        wps_path = self.root / "plugin.wps"
+        wps_path.write_bytes(self.wps)
+        subprocess.run([wups_binary], check=True, env={**os.environ,
+                        "CEMUEXTEND_WPS_CONFORMANCE_IMAGE": str(wps_path)})
+
+        package_path = self.root / "signed.cemod"
+        manifest_path = self.root / "manifest.json"
+        key_path = self.root / "private.pem"
+        manifest_path.write_text(json.dumps(manifest()), encoding="utf-8")
+        subprocess.run(["openssl", "genpkey", "-algorithm", "ED25519", "-out", str(key_path)], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run([sys.executable, str(TOOLS / "package_cemod.py"), "--manifest", str(manifest_path),
+                        "--wps", str(wps_path), "--private-key", str(key_path), "--output", str(package_path)],
+                       check=True)
+        package_binary = os.environ.get("CEMUEXTEND_PACKAGE_BINARY")
+        if not package_binary:
+            candidate = ROOT.parent / "CemuExtend" / "build/nix/src/Cafe/cemod_package_tests"
+            package_binary = str(candidate) if candidate.exists() else None
+        if not package_binary:
+            self.skipTest("set CEMUEXTEND_PACKAGE_BINARY to run the C++ package conformance test")
+        subprocess.run([package_binary], check=True, env={**os.environ,
+                        "CEMUEXTEND_CEMOD_CONFORMANCE_PACKAGE": str(package_path)})
 
 
 if __name__ == "__main__":

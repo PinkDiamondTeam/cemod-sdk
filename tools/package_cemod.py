@@ -8,7 +8,8 @@ import subprocess
 import tempfile
 import zipfile
 
-from cemodlib import CemodError, canonical_signature_digest, inspect_wups, validate_manifest
+from cemodlib import (CemodError, MAX_MANIFEST_BYTES, _reject_json_constant,
+                      canonical_signature_digest, inspect_wups, validate_elf, validate_manifest)
 
 
 ED25519_DER_PREFIX = bytes.fromhex("302a300506032b6570032100")
@@ -86,9 +87,11 @@ def main() -> None:
 
     try:
         manifest_raw = read_file(args.manifest, "manifest")
+        if len(manifest_raw) > MAX_MANIFEST_BYTES:
+            raise CemodError("manifest.json has an invalid size")
         try:
-            manifest = json.loads(manifest_raw)
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            manifest = json.loads(manifest_raw, parse_constant=_reject_json_constant)
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
             raise CemodError(f"manifest is malformed: {error}") from None
         manifest_format, manifest_path = validate_manifest(manifest)
         if args.elf:
@@ -109,6 +112,8 @@ def main() -> None:
             raise CemodError("payload is empty")
         if selected_format == "wups":
             inspect_wups(payload_data)
+        else:
+            validate_elf(payload_data)
 
         encoded_manifest = (json.dumps(manifest, ensure_ascii=False, sort_keys=True,
                                        separators=(",", ":")) + "\n").encode("utf-8")
@@ -139,6 +144,12 @@ def main() -> None:
                                  compresslevel=9) as archive:
                 for name, data in entries.items():
                     info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+                    info.create_system = 3
+                    info.create_version = 20
+                    info.extract_version = 20
+                    info.flag_bits = 0
+                    info.extra = b""
+                    info.comment = b""
                     info.compress_type = zipfile.ZIP_DEFLATED
                     info.external_attr = 0o100644 << 16
                     archive.writestr(info, data)
