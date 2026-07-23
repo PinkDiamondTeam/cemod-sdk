@@ -36,6 +36,11 @@ CEMOD_DATA            ?=
 CEMOD_MANIFEST        ?= $(PROJECT_ROOT)/manifest.json
 CEMOD_TARGET          ?= $(CEMOD_NAME)
 CEMOD_PROJECT_MAKEFILE ?= $(PROJECT_ROOT)/Makefile
+CEMOD_PAYLOAD_FORMAT  ?= cemod_elf
+CEMOD_WPS             ?= $(PROJECT_ROOT)/build/plugin.wps
+CEMOD_PRIVATE_KEY     ?=
+CEMOD_PUBLIC_KEY      ?=
+CEMOD_SIGNATURE       ?=
 
 CEMOD_EXTRA_DEFINES       ?=
 CEMOD_EXTRA_CFLAGS        ?=
@@ -68,7 +73,11 @@ PACKAGE_PATH  := $(DIST_ROOT)/$(CEMOD_NAME).cemod
 # docker-build/docker-install run entirely inside the Docker image built
 # from cemod-sdk and never need a local devkitPPC/devkitPRO checkout, so
 # skip the toolchain checks when that's the only thing being requested.
-CEMOD_TOOLCHAIN_GOALS := $(filter-out docker-build docker-install,$(if $(MAKECMDGOALS),$(MAKECMDGOALS),all))
+ifeq ($(CEMOD_PAYLOAD_FORMAT),wups)
+CEMOD_TOOLCHAIN_GOALS :=
+else
+CEMOD_TOOLCHAIN_GOALS := $(filter-out docker-build docker-install verify-wups inspect-wups,$(if $(MAKECMDGOALS),$(MAKECMDGOALS),all))
+endif
 ifneq ($(strip $(CEMOD_TOOLCHAIN_GOALS)),)
 ifeq ($(strip $(DEVKITPPC)),)
 $(error "Please set DEVKITPPC in your environment. export DEVKITPPC=<path to>devkitPPC")
@@ -116,6 +125,24 @@ TARGET       := $(CEMOD_TARGET)
 BUILD        := $(BUILD_ROOT)/$(TARGET)
 ELF_PATH     := $(BUILD)/$(TARGET).elf
 DBG_ELF_PATH := $(BUILD)/$(TARGET)_dbg.elf
+CEMOD_ELF    ?= $(ELF_PATH)
+ifeq ($(CEMOD_PAYLOAD_FORMAT),wups)
+CEMOD_PAYLOAD_SOURCE := $(CEMOD_WPS)
+CEMOD_PACKAGE_PAYLOAD_ARG := --wps
+else ifeq ($(CEMOD_PAYLOAD_FORMAT),cemod_elf)
+CEMOD_PAYLOAD_SOURCE := $(CEMOD_ELF)
+CEMOD_PACKAGE_PAYLOAD_ARG := --elf
+else
+$(error "CEMOD_PAYLOAD_FORMAT must be cemod_elf or wups")
+endif
+ifneq ($(strip $(CEMOD_PRIVATE_KEY)),)
+ifneq ($(strip $(CEMOD_PUBLIC_KEY)$(CEMOD_SIGNATURE)),)
+$(error "CEMOD_PRIVATE_KEY cannot be combined with CEMOD_PUBLIC_KEY/CEMOD_SIGNATURE")
+endif
+CEMOD_SIGN_ARGS := --private-key "$(CEMOD_PRIVATE_KEY)"
+else ifneq ($(strip $(CEMOD_PUBLIC_KEY)$(CEMOD_SIGNATURE)),)
+CEMOD_SIGN_ARGS := --public-key "$(CEMOD_PUBLIC_KEY)" --signature "$(CEMOD_SIGNATURE)"
+endif
 # Merge rather than overwrite: third-party *.mk helpers included by the
 # project before cemod.mk (libhookevent.mk, libcemuextend.mk, ...) commonly
 # do `SOURCES += ...` / `INCLUDES += ...` / `DATA += ...` against these plain
@@ -189,7 +216,7 @@ LIBDIRS := $(PROJECT_ROOT) \
 # rules for different file extensions
 #---------------------------------------------------------------------------------
 .PHONY: $(BUILD) build all clean install package print-project-config \
-	verify-package verify-wchar
+	verify-package verify-wups inspect-wups verify-wchar
 
 ifneq ($(abspath $(BUILD)),$(abspath $(CURDIR)))
 #---------------------------------------------------------------------------------
@@ -240,11 +267,13 @@ export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib) \
 					-L$(LIBOGC_LIB) -L$(PORTLIBS)/lib
 
 #---------------------------------------------------------------------------------
+ifneq ($(CEMOD_PAYLOAD_FORMAT),wups)
 $(BUILD): $(CEMOD_EXTRA_BUILD_DEPS)
 	@mkdir -p "$@"
 	@$(MAKE) --no-print-directory -C "$@" -f "$(CEMOD_PROJECT_MAKEFILE)" "$(ELF_PATH)"
 
 build: $(BUILD)
+endif
 
 #---------------------------------------------------------------------------------
 clean:
@@ -257,20 +286,34 @@ print-project-config:
 		'TARGET=$(TARGET)' \
 		'BUILD=$(BUILD)' \
 		'ELF_PATH=$(ELF_PATH)' \
+		'CEMOD_PAYLOAD_FORMAT=$(CEMOD_PAYLOAD_FORMAT)' \
+		'CEMOD_PAYLOAD_SOURCE=$(CEMOD_PAYLOAD_SOURCE)' \
 		'PACKAGE_PATH=$(PACKAGE_PATH)'
 
+ifeq ($(CEMOD_PAYLOAD_FORMAT),wups)
+build all: $(CEMOD_WPS)
+else
 all: $(BUILD)
+endif
 
 package: all
 	@mkdir -p "$(DIST_ROOT)"
-	@$(PYTHON) "$(CEMOD_SDK_ROOT)/tools/package_cemod.py" --manifest "$(CEMOD_MANIFEST)" --elf "$(ELF_PATH)" \
-		--output "$(PACKAGE_PATH)"
+	@$(PYTHON) "$(CEMOD_SDK_ROOT)/tools/package_cemod.py" --manifest "$(CEMOD_MANIFEST)" \
+		$(CEMOD_PACKAGE_PAYLOAD_ARG) "$(CEMOD_PAYLOAD_SOURCE)" \
+		--output "$(PACKAGE_PATH)" $(CEMOD_SIGN_ARGS)
 	@$(MAKE) verify-package
 	@echo "Packaged $(PACKAGE_PATH)"
 
 verify-package:
 	@$(PYTHON) "$(CEMOD_SDK_ROOT)/tools/verify_cemod.py" --package "$(PACKAGE_PATH)" \
 		--readelf "$(PREFIX)readelf" --nm "$(PREFIX)nm" --objdump "$(PREFIX)objdump"
+
+verify-wups:
+	@$(PYTHON) "$(CEMOD_SDK_ROOT)/tools/verify_wups.py" --wps "$(CEMOD_WPS)"
+
+inspect-wups:
+	@$(PYTHON) "$(CEMOD_SDK_ROOT)/tools/inspect_wups.py" --wps "$(CEMOD_WPS)" \
+		--manifest "$(CEMOD_MANIFEST)"
 
 install: package
 	@test -n "$(CEMU_DATA_DIR)" || { echo 'Set CEMU_DATA_DIR to the Cemu data directory.' >&2; exit 1; }

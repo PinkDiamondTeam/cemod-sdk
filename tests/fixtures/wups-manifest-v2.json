@@ -1,0 +1,37 @@
+{
+  "package_version": 2,
+  "api_version": 2,
+  "execution_mode": "trusted_native",
+  "payload": {
+    "format": "wups",
+    "path": "plugin.wps"
+  },
+  "scope": {
+    "type": "process",
+    "targets": [
+      "game",
+      "wii_u_menu"
+    ]
+  },
+  "permissions": {
+    "native_memory": true,
+    "function_patching": true,
+    "physical_address_patching": true,
+    "filesystem": {
+      "read": true,
+      "write": true
+    },
+    "network": false,
+    "mapped_memory": true,
+    "notifications": false,
+    "content_redirection": false,
+    "modules": [
+      "homebrew_memorymapping"
+    ]
+  },
+  "mod_id": "org.example.wups.conformance",
+  "title_ids": [
+    "0005000012345678"
+  ],
+  "requested_permissions": []
+}
