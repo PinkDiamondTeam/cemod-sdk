@@ -5,26 +5,16 @@
 # platform build reuses the same devkitPPC/mcwiiu-stdlib toolchain.
 #
 # The build context MUST be the consuming project's root directory (same
-# convention as Dockerfile) so third_party/toolchains/{wut-tools,
-# WiiUPluginSystem}/ resolve. BUILDER_IMAGE must name the project's already
-#-built ELF builder image (see compose.wups.yaml's `args`).
+# convention as Dockerfile) so third_party/toolchains/WiiUPluginSystem/
+# resolves. BUILDER_IMAGE must name the project's already-built ELF builder
+# image (see compose.wups.yaml's `args`). elf2rpl/readrpl ship prebuilt in
+# BASE_IMAGE/BUILDER_IMAGE already, so there is no wut-tools build stage.
 #
 # Both ARGs must be declared here, before the first FROM: BuildKit only
 # resolves ARG references inside a FROM instruction (including later
 # stages') against ARGs declared before the Dockerfile's first FROM.
 ARG BASE_IMAGE=ghcr.io/wiiu-env/devkitppc:20260504@sha256:68785e7d75b070b0aea03272b61f36dd2fddfda4f442cdf0e27b168bd36a09fb
 ARG BUILDER_IMAGE
-
-FROM ${BASE_IMAGE} AS wut-tools-build
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends autoconf automake libtool libfreeimage-dev pkg-config zlib1g-dev \
-    && rm -rf /var/lib/apt/lists/*
-WORKDIR /src/wut-tools
-COPY third_party/toolchains/wut-tools/ ./
-RUN ./autogen.sh && mkdir build && cd build && ../configure \
-    && make -j"$(nproc)" elf2rpl elf2rpl-obfuscater \
-    && mkdir -p /artifacts/tools/bin \
-    && install -m 0755 elf2rpl-obfuscater /artifacts/tools/bin/elf2rpl-obfuscater
 
 FROM ${BASE_IMAGE} AS wups-build
 WORKDIR /src/WiiUPluginSystem
@@ -36,12 +26,12 @@ RUN make clean && make -j"$(nproc)" \
 
 FROM ${BUILDER_IMAGE}
 COPY --from=wups-build /artifacts/ /opt/devkitpro/
-COPY --from=wut-tools-build /artifacts/ /opt/devkitpro/
 RUN test "$(powerpc-eabi-gcc -dumpfullversion)" = "14.2.0" \
     && test -f /opt/devkitpro/mcwiiu-stdlib/.wchar16 \
     && test -f /opt/devkitpro/devkitPPC/base_rules \
     && test -f /opt/devkitpro/wups/share/wups_rules \
     && test -f /opt/devkitpro/wups/lib/libwups.a \
-    && test -x /opt/devkitpro/tools/bin/elf2rpl-obfuscater
+    && test -x /opt/devkitpro/tools/bin/elf2rpl \
+    && test -x /opt/devkitpro/tools/bin/readrpl
 WORKDIR /project
 CMD ["sh", "-c", "sh \"$CEMOD_SDK_ROOT/infra/docker/build-wups.sh\""]

@@ -16,7 +16,7 @@ powerpc-eabi-gcc --version
 python3 --version
 test -f "$DEVKITPRO/wups/share/wups_rules"
 test -f "$DEVKITPRO/mcwiiu-stdlib/.wchar16"
-command -v elf2rpl-obfuscater >/dev/null
+command -v elf2rpl >/dev/null
 command -v readrpl >/dev/null
 
 wps_path=$(make --no-print-directory print-project-config CEMOD_PAYLOAD_FORMAT=wups | sed -n 's/^CEMOD_PAYLOAD_SOURCE=//p')
