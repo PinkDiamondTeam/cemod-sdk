@@ -8,7 +8,12 @@
 # convention as Dockerfile) so third_party/toolchains/{wut-tools,
 # WiiUPluginSystem}/ resolve. BUILDER_IMAGE must name the project's already
 #-built ELF builder image (see compose.wups.yaml's `args`).
+#
+# Both ARGs must be declared here, before the first FROM: BuildKit only
+# resolves ARG references inside a FROM instruction (including later
+# stages') against ARGs declared before the Dockerfile's first FROM.
 ARG BASE_IMAGE=ghcr.io/wiiu-env/devkitppc:20260504@sha256:68785e7d75b070b0aea03272b61f36dd2fddfda4f442cdf0e27b168bd36a09fb
+ARG BUILDER_IMAGE
 
 FROM ${BASE_IMAGE} AS wut-tools-build
 RUN apt-get update \
@@ -29,7 +34,6 @@ RUN make clean && make -j"$(nproc)" \
     && cp -a lib include share /artifacts/wups/ \
     && cp /opt/devkitpro/devkitPPC/base_rules /opt/devkitpro/devkitPPC/base_tools /artifacts/devkitPPC/
 
-ARG BUILDER_IMAGE
 FROM ${BUILDER_IMAGE}
 COPY --from=wups-build /artifacts/ /opt/devkitpro/
 COPY --from=wut-tools-build /artifacts/ /opt/devkitpro/
