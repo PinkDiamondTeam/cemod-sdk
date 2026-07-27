@@ -1,12 +1,18 @@
 #!/bin/sh
-# Host-side Docker orchestrator, shared by every cemod-sdk project.
+# Host-side Docker orchestrator, shared by every cemod-sdk project. Builds
+# either the trusted-native ELF payload or, with --wups, the WUPS plugin
+# payload -- both from the project's single compose.yaml (the wups-builder
+# service is gated behind the "wups" compose profile).
+#
+# Usage: docker-build.sh [--wups] [--install [Cemu data directory]]
 #
 # Required environment (normally exported by the project's docker-build.sh
 # wrapper, see cemod.mk's `docker-build` target for the canonical example):
 #   PROJECT_ROOT          absolute path to the consuming project (compose context)
 #   CEMOD_SDK_ROOT         absolute path to this SDK checkout
 #   DEVKITPPC_ARCHIVE     path, relative to PROJECT_ROOT, to the vendored
-#                         devkitPPC .pkg.tar.zst
+#                         devkitPPC .pkg.tar.zst (also needed for --wups: the
+#                         wups-builder image layers on top of the ELF builder image)
 #   DEVKITPPC_SHA256      expected sha256 of that archive
 #
 # Optional environment:
@@ -14,8 +20,15 @@
 #                         project-specific preflight checks (embedded assets,
 #                         submodule status, etc). Skipped if unset.
 #   CEMOD_EXTRA_VERIFY    space-separated extra `make` targets run inside the
-#                         container before packaging (e.g. verify-cemuextend-sdk)
+#                         container before packaging (e.g. verify-cemuextend-sdk).
+#                         Only used on the ELF path; ignored with --wups.
 set -eu
+
+wups=0
+if [ "${1:-}" = "--wups" ]; then
+  wups=1
+  shift
+fi
 
 : "${PROJECT_ROOT:?PROJECT_ROOT must be set}"
 : "${CEMOD_SDK_ROOT:?CEMOD_SDK_ROOT must be set}"
@@ -44,16 +57,22 @@ fi
 export HOST_UID="$(id -u)"
 export HOST_GID="$(id -g)"
 export CEMOD_SDK_ROOT
-export CEMOD_EXTRA_VERIFY="${CEMOD_EXTRA_VERIFY:-}"
 export DEVKITPPC_ARCHIVE
 export DEVKITPPC_SHA256
 
-docker compose build
-docker compose run --rm builder
+if [ "$wups" = 1 ]; then
+  docker compose build builder
+  docker compose --profile wups build wups-builder
+  docker compose --profile wups run --rm wups-builder
+else
+  export CEMOD_EXTRA_VERIFY="${CEMOD_EXTRA_VERIFY:-}"
+  docker compose build builder
+  docker compose run --rm builder
+fi
 
 if [ "${1:-}" = "--install" ]; then
   if [ "$#" -gt 2 ]; then
-    echo "Usage: $0 --install [Cemu data directory]" >&2
+    echo "Usage: $0 [--wups] --install [Cemu data directory]" >&2
     exit 2
   fi
   sh "$CEMOD_SDK_ROOT/infra/docker/install-cemu-pack.sh" "${2:-}"

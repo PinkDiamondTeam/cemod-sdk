@@ -2,7 +2,7 @@
 # Copy built .cemod package(s) into a Cemu data directory's mods folder.
 # Installs out/dist/<PROJECT_NAME>.cemod (cemod_elf payload, from
 # ./docker-build.sh) and/or out/dist/<PROJECT_NAME>-wups.cemod (wups
-# payload, from ./docker-build-wups.sh) -- whichever have been built. At
+# payload, from ./docker-build.sh --wups) -- whichever have been built. At
 # least one must exist.
 #
 # Required environment: PROJECT_ROOT (consuming project root, containing
@@ -45,6 +45,6 @@ done
 
 if [ "$installed_any" -eq 0 ]; then
   echo "Build artifacts are missing: $PROJECT_ROOT/out/dist/$project_name.cemod / $project_name-wups.cemod" >&2
-  echo "Run ./docker-build.sh and/or ./docker-build-wups.sh first." >&2
+  echo "Run ./docker-build.sh and/or ./docker-build.sh --wups first." >&2
   exit 1
 fi

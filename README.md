@@ -159,14 +159,19 @@ compatibility error.
 ## Docker build
 
 `docker-build` / `docker-install` do not require a local devkitPPC
-checkout -- the toolchain lives entirely in the Docker image built from
-`infra/docker/Dockerfile`. A consuming project needs:
+checkout -- the toolchain lives entirely in Docker images built from the
+single, multi-stage `infra/docker/Dockerfile`, selected via `--target`:
+`builder` (the trusted-native ELF payload; the default) and `wups-builder`
+(the WUPS plugin payload, layered on top of `builder`). A consuming project
+needs:
 
-- `compose.yaml` with a `builder` service whose `build.dockerfile` points at
-  `${CEMOD_SDK_ROOT}/infra/docker/Dockerfile` and whose
-  `build.additional_contexts` maps `sdk: ${CEMOD_SDK_ROOT}/infra/docker`
-  (BuildKit's multi-context COPY, so the stdlib build script/patch don't
-  need to be duplicated into every project).
+- `compose.yaml` with `builder` and `wups-builder` services, both pointing
+  `build.dockerfile` at `${CEMOD_SDK_ROOT}/infra/docker/Dockerfile` (with
+  `build.target` set to the matching stage) and `build.additional_contexts`
+  mapping `sdk: ${CEMOD_SDK_ROOT}/infra/docker` (BuildKit's multi-context
+  COPY, so the stdlib build script/patch don't need to be duplicated into
+  every project). Gate `wups-builder` behind `profiles: ["wups"]` so it's
+  excluded from a plain `docker compose build`/`up`.
 - A `volumes` entry bind-mounting `${CEMOD_SDK_ROOT}:${CEMOD_SDK_ROOT}:ro`
   in addition to the project root, so the in-container `make` invocation
   can `include $(CEMOD_SDK_ROOT)/cemod.mk` at the same absolute path as on
@@ -174,40 +179,39 @@ checkout -- the toolchain lives entirely in the Docker image built from
 - A vendored devkitPPC archive under the project (`infra/docker/vendor/devkitPPC/`,
   referenced via `DEVKITPPC_ARCHIVE`/`DEVKITPPC_SHA256`), since that's a
   large binary better kept per-project/cache than duplicated in the SDK.
+  Both services need it: the `wups-builder` image layers on top of `builder`.
 - A host-side entry point (see `mcwiiu-client-template/docker-build.sh`)
   that exports `PROJECT_ROOT`, `CEMOD_SDK_ROOT`, `DEVKITPPC_ARCHIVE`,
   `DEVKITPPC_SHA256`, and optionally `CEMOD_PREBUILD_CHECK` (a script for
   project-specific preflight checks) and `CEMOD_EXTRA_VERIFY` (extra `make`
   targets run in-container before packaging, e.g. a project's own SDK
-  header smoke test), then runs `infra/docker/docker-build.sh`.
+  header smoke test), then runs `infra/docker/docker-build.sh [--wups]`.
 
 See `mcwiiu-client-template/{compose.yaml,docker-build.sh,infra/docker/prebuild-check.sh}`
 for the reference wiring.
 
 ## WUPS Docker build
 
-The `wups` payload format (`CEMOD_PAYLOAD_FORMAT=wups`) has its own generic
-Docker path, `infra/docker/{Dockerfile.wups,build-wups.sh,docker-build-wups.sh}`,
-mirroring the ELF one above rather than duplicating it per project. It
-layers a WUPS toolchain (built from the project's own `wut-tools` and
-`WiiUPluginSystem` submodules) on top of the project's already-built ELF
-`builder` image, then builds `platforms/wups/<target>.wps` and packages it
-with `make CEMOD_PAYLOAD_FORMAT=wups package`. A consuming project needs:
+The `wups` payload format (`CEMOD_PAYLOAD_FORMAT=wups`) shares the Docker
+path above via the `wups-builder` stage/service and `docker-build.sh --wups`
+rather than duplicating it per project. That stage layers a WUPS toolchain
+(built from the project's own `WiiUPluginSystem` submodule; `elf2rpl`/
+`readrpl` already ship in the base image) on top of the `builder` stage,
+then `infra/docker/build-wups.sh` builds `platforms/wups/<target>.wps` and
+packages it with `make CEMOD_PAYLOAD_FORMAT=wups package`. A consuming
+project needs:
 
-- `third_party/toolchains/{wut-tools,WiiUPluginSystem}` submodules.
+- `third_party/toolchains/WiiUPluginSystem` submodule.
 - A `platforms/wups/Makefile` that builds `platforms/wups/<target>.{wps,elf}`
   and `platforms/wups/<target>_dbg.wps` (see `aqua/platforms/wups/Makefile`).
 - `CEMOD_WPS` set to that `.wps` path when `CEMOD_PAYLOAD_FORMAT=wups` (see
   the project's `Makefile`) -- `build-wups.sh` reads it back via
   `make print-project-config CEMOD_PAYLOAD_FORMAT=wups` instead of
   hardcoding a target name.
-- `compose.wups.yaml` with a `wups-builder` service whose `build.dockerfile`
-  points at `${CEMOD_SDK_ROOT}/infra/docker/Dockerfile.wups`, `build.args`
-  sets `BUILDER_IMAGE` to the project's own `builder` image name, and the
-  same `${CEMOD_SDK_ROOT}:${CEMOD_SDK_ROOT}:ro` bind mount as `compose.yaml`.
-- A host-side entry point exporting `PROJECT_ROOT`/`CEMOD_SDK_ROOT` (and
-  optionally `CEMOD_PREBUILD_CHECK`) that runs
-  `infra/docker/docker-build-wups.sh`.
+- The `wups-builder` service in `compose.yaml` described above (`target:
+  wups-builder`, `profiles: ["wups"]`).
+- The same host-side entry point as the ELF path, invoked as
+  `./docker-build.sh --wups`.
 
-See `aqua/{compose.wups.yaml,docker-build-wups.sh,platforms/wups/Makefile}`
+See `aqua/{compose.yaml,docker-build.sh,platforms/wups/Makefile}`
 for the reference wiring.

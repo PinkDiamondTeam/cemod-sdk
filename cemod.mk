@@ -436,7 +436,8 @@ docker-build:
 	@PROJECT_ROOT="$(PROJECT_ROOT)" CEMOD_SDK_ROOT="$(CEMOD_SDK_ROOT)" \
 		DEVKITPPC_ARCHIVE="$(DEVKITPPC_ARCHIVE)" DEVKITPPC_SHA256="$(DEVKITPPC_SHA256)" \
 		CEMOD_PREBUILD_CHECK="$(CEMOD_PREBUILD_CHECK)" CEMOD_EXTRA_VERIFY="$(CEMOD_EXTRA_VERIFY)" \
-		sh "$(CEMOD_SDK_ROOT)/infra/docker/docker-build.sh" $(CEMOD_DOCKER_ARGS)
+		sh "$(CEMOD_SDK_ROOT)/infra/docker/docker-build.sh" \
+		$(if $(filter wups,$(CEMOD_PAYLOAD_FORMAT)),--wups) $(CEMOD_DOCKER_ARGS)
 
 docker-install:
 	@$(MAKE) docker-build CEMOD_DOCKER_ARGS="--install $(CEMU_DATA_DIR)"
