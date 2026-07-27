@@ -437,9 +437,13 @@ docker-build:
 		DEVKITPPC_ARCHIVE="$(DEVKITPPC_ARCHIVE)" DEVKITPPC_SHA256="$(DEVKITPPC_SHA256)" \
 		CEMOD_PREBUILD_CHECK="$(CEMOD_PREBUILD_CHECK)" CEMOD_EXTRA_VERIFY="$(CEMOD_EXTRA_VERIFY)" \
 		sh "$(CEMOD_SDK_ROOT)/infra/docker/host/docker-build.sh" \
-		$(if $(filter wups,$(CEMOD_PAYLOAD_FORMAT)),--wups) $(CEMOD_DOCKER_ARGS)
+		$(if $(filter wups,$(CEMOD_PAYLOAD_FORMAT)),--wups)
 
+# Installs whatever out/dist/*.cemod artifacts already exist (ELF and/or
+# WUPS); it does not build anything, so it's independent of
+# CEMOD_PAYLOAD_FORMAT/--wups.
 docker-install:
-	@$(MAKE) docker-build CEMOD_DOCKER_ARGS="--install $(CEMU_DATA_DIR)"
+	@PROJECT_ROOT="$(PROJECT_ROOT)" CEMOD_SDK_ROOT="$(CEMOD_SDK_ROOT)" \
+		sh "$(CEMOD_SDK_ROOT)/infra/docker/host/docker-build.sh" --install $(CEMU_DATA_DIR)
 
 .PHONY: docker-build docker-install

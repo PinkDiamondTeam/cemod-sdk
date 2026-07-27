@@ -158,11 +158,15 @@ compatibility error.
 
 ## Docker build
 
-`docker-build` / `docker-install` do not require a local devkitPPC
-checkout -- the toolchain lives entirely in Docker images built from the
-single, multi-stage `infra/docker/image/Dockerfile`, selected via
-`--target`: `builder` (the trusted-native ELF payload; the default) and
-`wups-builder` (the WUPS plugin payload, layered on top of `builder`).
+`docker-build` does not require a local devkitPPC checkout -- the toolchain
+lives entirely in Docker images built from the single, multi-stage
+`infra/docker/image/Dockerfile`, selected via `--target`: `builder` (the
+trusted-native ELF payload; the default) and `wups-builder` (the WUPS
+plugin payload, layered on top of `builder`). `docker-install` doesn't
+touch Docker at all: it just copies whichever `out/dist/*.cemod` artifacts
+`docker-build` already produced (ELF and/or WUPS) into a Cemu data
+directory, so it's independent of `CEMOD_PAYLOAD_FORMAT`/`--wups` and never
+triggers a build.
 `infra/docker/` is laid out by *when* each piece runs:
 
 - `infra/docker/host/` -- scripts that run on the developer's machine:
