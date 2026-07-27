@@ -4,15 +4,11 @@
 # payload -- both from the project's single compose.yaml (the wups-builder
 # service is gated behind the "wups" compose profile).
 #
-# Usage:
-#   docker-build.sh [--wups]              build the ELF, or with --wups the
-#                                          WUPS, payload
-#   docker-build.sh --install [Cemu dir]  install already-built out/dist
-#                                          artifacts (does not build anything;
-#                                          --wups doesn't apply here since
-#                                          install-cemu-pack.sh picks up
-#                                          whichever *.cemod files -- ELF
-#                                          and/or WUPS -- are already present)
+# Usage: docker-build.sh [--wups] [--install [Cemu data directory]]
+#
+# --install installs the .cemod this invocation just built (the
+# `-wups`-suffixed one with --wups, the plain one otherwise) -- it never
+# touches any other package that might already be sitting in out/dist.
 #
 # Required environment (normally exported by the project's docker-build.sh
 # wrapper, see cemod.mk's `docker-build`/`docker-install` targets for the
@@ -21,40 +17,28 @@
 #   CEMOD_SDK_ROOT         absolute path to this SDK checkout
 #   DEVKITPPC_ARCHIVE     path, relative to PROJECT_ROOT, to the vendored
 #                         devkitPPC .pkg.tar.zst (also needed for --wups: the
-#                         wups-builder image layers on top of the ELF builder
-#                         image). Not required for --install.
-#   DEVKITPPC_SHA256      expected sha256 of that archive. Not required for
-#                         --install.
+#                         wups-builder image layers on top of the ELF builder image)
+#   DEVKITPPC_SHA256      expected sha256 of that archive
 #
 # Optional environment:
 #   CEMOD_PREBUILD_CHECK  path to an executable run before Docker starts, for
 #                         project-specific preflight checks (embedded assets,
-#                         submodule status, etc). Skipped if unset, and not
-#                         run for --install.
+#                         submodule status, etc). Skipped if unset.
 #   CEMOD_EXTRA_VERIFY    space-separated extra `make` targets run inside the
 #                         container before packaging (e.g. verify-cemuextend-sdk).
 #                         Only used on the ELF path; ignored with --wups.
 set -eu
-
-: "${PROJECT_ROOT:?PROJECT_ROOT must be set}"
-: "${CEMOD_SDK_ROOT:?CEMOD_SDK_ROOT must be set}"
-
-if [ "${1:-}" = "--install" ]; then
-  if [ "$#" -gt 2 ]; then
-    echo "Usage: $0 --install [Cemu data directory]" >&2
-    exit 2
-  fi
-  exec sh "$CEMOD_SDK_ROOT/infra/docker/host/install-cemu-pack.sh" "${2:-}"
-fi
-
-: "${DEVKITPPC_ARCHIVE:?DEVKITPPC_ARCHIVE must be set}"
-: "${DEVKITPPC_SHA256:?DEVKITPPC_SHA256 must be set}"
 
 wups=0
 if [ "${1:-}" = "--wups" ]; then
   wups=1
   shift
 fi
+
+: "${PROJECT_ROOT:?PROJECT_ROOT must be set}"
+: "${CEMOD_SDK_ROOT:?CEMOD_SDK_ROOT must be set}"
+: "${DEVKITPPC_ARCHIVE:?DEVKITPPC_ARCHIVE must be set}"
+: "${DEVKITPPC_SHA256:?DEVKITPPC_SHA256 must be set}"
 
 cd "$PROJECT_ROOT"
 
@@ -85,8 +69,18 @@ if [ "$wups" = 1 ]; then
   docker compose build builder
   docker compose --profile wups build wups-builder
   docker compose --profile wups run --rm wups-builder
+  suffix="-wups"
 else
   export CEMOD_EXTRA_VERIFY="${CEMOD_EXTRA_VERIFY:-}"
   docker compose build builder
   docker compose run --rm builder
+  suffix=""
+fi
+
+if [ "${1:-}" = "--install" ]; then
+  if [ "$#" -gt 2 ]; then
+    echo "Usage: $0 [--wups] --install [Cemu data directory]" >&2
+    exit 2
+  fi
+  sh "$CEMOD_SDK_ROOT/infra/docker/host/install-cemu-pack.sh" "$suffix" "${2:-}"
 fi

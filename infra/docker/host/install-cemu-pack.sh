@@ -1,17 +1,19 @@
 #!/bin/sh
-# Copy built .cemod package(s) into a Cemu data directory's mods folder.
-# Installs out/dist/<PROJECT_NAME>.cemod (cemod_elf payload, from
-# ./docker-build.sh) and/or out/dist/<PROJECT_NAME>-wups.cemod (wups
-# payload, from ./docker-build.sh --wups) -- whichever have been built. At
-# least one must exist.
+# Copy one just-built .cemod package into a Cemu data directory's mods
+# folder. Installs exactly out/dist/<PROJECT_NAME><suffix>.cemod -- suffix
+# is "" for the cemod_elf payload (./docker-build.sh) or "-wups" for the
+# WUPS payload (./docker-build.sh --wups). Never touches any other package
+# that might already be sitting in out/dist.
 #
 # Required environment: PROJECT_ROOT (consuming project root, containing
 # config/project.mk and out/dist/).
+# Usage: install-cemu-pack.sh <suffix> [Cemu data directory]
 set -eu
 
 : "${PROJECT_ROOT:?PROJECT_ROOT must be set}"
-project_config="$PROJECT_ROOT/config/project.mk"
+suffix="${1?suffix must be given (\"\" for cemod_elf, \"-wups\" for wups)}"
 
+project_config="$PROJECT_ROOT/config/project.mk"
 if [ ! -f "$project_config" ]; then
   echo "Project configuration is missing: $project_config" >&2
   exit 1
@@ -23,28 +25,20 @@ if [ -z "$project_name" ]; then
   exit 1
 fi
 
-if [ -n "${1:-}" ]; then
-  cemu_dir=${1%/}
+if [ -n "${2:-}" ]; then
+  cemu_dir=${2%/}
 else
   cemu_dir="${XDG_DATA_HOME:-$HOME/.local/share}/Cemu"
 fi
 
-mod_destination="$cemu_dir/cemuextend/mods"
-installed_any=0
-
-for suffix in "" "-wups"; do
-  source_file="$PROJECT_ROOT/out/dist/$project_name$suffix.cemod"
-  if [ -s "$source_file" ]; then
-    mkdir -p "$mod_destination"
-    installed_file="$mod_destination/$project_name$suffix.cemod"
-    cp "$source_file" "$installed_file"
-    echo "Installed $project_name$suffix cemod: $installed_file"
-    installed_any=1
-  fi
-done
-
-if [ "$installed_any" -eq 0 ]; then
-  echo "Build artifacts are missing: $PROJECT_ROOT/out/dist/$project_name.cemod / $project_name-wups.cemod" >&2
-  echo "Run ./docker-build.sh and/or ./docker-build.sh --wups first." >&2
+source_file="$PROJECT_ROOT/out/dist/$project_name$suffix.cemod"
+if [ ! -s "$source_file" ]; then
+  echo "Build artifact is missing: $source_file" >&2
   exit 1
 fi
+
+mod_destination="$cemu_dir/cemuextend/mods"
+mkdir -p "$mod_destination"
+installed_file="$mod_destination/$project_name$suffix.cemod"
+cp "$source_file" "$installed_file"
+echo "Installed $project_name$suffix cemod: $installed_file"
