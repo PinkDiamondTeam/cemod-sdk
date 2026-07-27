@@ -92,7 +92,7 @@ export PORTLIBS    := $(DEVKITPRO)/portlibs/ppc
 
 # Built from the same GCC 14.2/devkitPro sources as stock devkitPPC, with
 # native PowerPC TLS disabled so thread_local uses gthread-backed emulated
-# TLS. See infra/docker/build-short-wchar-stdlib.sh.
+# TLS. See infra/docker/image/build-short-wchar-stdlib.sh.
 ifneq ($(strip $(CEMOD_TOOLCHAIN_GOALS)),)
 ifeq ($(wildcard $(CEMOD_GCC)/bin/powerpc-eabi-g++),)
 $(error "Missing codecave-safe GCC: $(CEMOD_GCC). Build through docker-build.sh")
