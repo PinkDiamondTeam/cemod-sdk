@@ -75,5 +75,5 @@ if [ "${1:-}" = "--install" ]; then
     echo "Usage: $0 [--wups] --install [Cemu data directory]" >&2
     exit 2
   fi
-  sh "$CEMOD_SDK_ROOT/infra/docker/install-cemu-pack.sh" "${2:-}"
+  sh "$CEMOD_SDK_ROOT/infra/docker/host/install-cemu-pack.sh" "${2:-}"
 fi

@@ -1,8 +1,8 @@
 #!/bin/sh
 # In-container WUPS build driver, shared by every cemod-sdk project that has
 # a platforms/wups/Makefile producing a `.wps` (see README.md's WUPS usage
-# section). Generic across projects the same way build.sh is for the ELF
-# path: it never hardcodes a project or target name, instead reading
+# section). Generic across projects the same way container-build.sh is for
+# the ELF path: it never hardcodes a project or target name, instead reading
 # CEMOD_PAYLOAD_SOURCE (the project's platforms/wups/<target>.wps path) and
 # PACKAGE_PATH from `make print-project-config CEMOD_PAYLOAD_FORMAT=wups`.
 set -eu

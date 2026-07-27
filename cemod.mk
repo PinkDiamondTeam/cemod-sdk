@@ -428,15 +428,15 @@ endif
 #---------------------------------------------------------------------------------
 # Docker: reproducible build using the short-wchar toolchain. Requires the
 # project to provide compose.yaml (context ".") that builds
-# infra/docker/Dockerfile from this SDK with an "sdk" additional context
-# pointing at $(CEMOD_SDK_ROOT)/infra/docker, and to set DEVKITPPC_ARCHIVE /
-# DEVKITPPC_SHA256 (see cemod-sdk/README.md).
+# infra/docker/image/Dockerfile from this SDK with an "sdk" additional
+# context pointing at $(CEMOD_SDK_ROOT)/infra/docker/image, and to set
+# DEVKITPPC_ARCHIVE / DEVKITPPC_SHA256 (see cemod-sdk/README.md).
 #---------------------------------------------------------------------------------
 docker-build:
 	@PROJECT_ROOT="$(PROJECT_ROOT)" CEMOD_SDK_ROOT="$(CEMOD_SDK_ROOT)" \
 		DEVKITPPC_ARCHIVE="$(DEVKITPPC_ARCHIVE)" DEVKITPPC_SHA256="$(DEVKITPPC_SHA256)" \
 		CEMOD_PREBUILD_CHECK="$(CEMOD_PREBUILD_CHECK)" CEMOD_EXTRA_VERIFY="$(CEMOD_EXTRA_VERIFY)" \
-		sh "$(CEMOD_SDK_ROOT)/infra/docker/docker-build.sh" \
+		sh "$(CEMOD_SDK_ROOT)/infra/docker/host/docker-build.sh" \
 		$(if $(filter wups,$(CEMOD_PAYLOAD_FORMAT)),--wups) $(CEMOD_DOCKER_ARGS)
 
 docker-install:

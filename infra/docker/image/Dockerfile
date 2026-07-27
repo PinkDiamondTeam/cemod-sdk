@@ -13,10 +13,11 @@
 # resolves against the project's own infra/docker/vendor/devkitPPC/
 # directory, and so wups-builder's WiiUPluginSystem COPY resolves against
 # the project's own third_party/toolchains/WiiUPluginSystem/. A second named
-# context "sdk" must point at this SDK's infra/docker/ directory so the
-# stdlib build script and patch can be copied in without duplicating them
-# into every project. compose.yaml wires both contexts up via docker
-# compose's `additional_contexts`.
+# context "sdk" must point at this SDK's infra/docker/image/ directory (the
+# directory this Dockerfile itself lives in) so the stdlib build script and
+# patch can be copied in without duplicating them into every project.
+# compose.yaml wires both contexts up via docker compose's
+# `additional_contexts`.
 ARG BASE_IMAGE=ghcr.io/wiiu-env/devkitppc:20260225@sha256:472118aa3d2a1ebb62691e9ae18a21d4d8f14238d688d679c30f5973dc9d9f35
 ARG WUPS_BASE_IMAGE=ghcr.io/wiiu-env/devkitppc:20260504@sha256:68785e7d75b070b0aea03272b61f36dd2fddfda4f442cdf0e27b168bd36a09fb
 
@@ -44,7 +45,7 @@ RUN --mount=type=cache,target=/var/cache/mcwiiu-stdlib \
     && rm /tmp/build-short-wchar-stdlib.sh
 
 WORKDIR /project
-CMD ["sh", "-c", "sh \"$CEMOD_SDK_ROOT/infra/docker/build.sh\""]
+CMD ["sh", "-c", "sh \"$CEMOD_SDK_ROOT/infra/docker/container/container-build.sh\""]
 
 # elf2rpl/readrpl ship prebuilt in BASE_IMAGE already (inherited via the
 # `builder` stage below), so there is no wut-tools build stage here -- only
@@ -66,4 +67,4 @@ RUN test "$(powerpc-eabi-gcc -dumpfullversion)" = "14.2.0" \
     && test -f /opt/devkitpro/wups/lib/libwups.a \
     && test -x /opt/devkitpro/tools/bin/elf2rpl \
     && test -x /opt/devkitpro/tools/bin/readrpl
-CMD ["sh", "-c", "sh \"$CEMOD_SDK_ROOT/infra/docker/build-wups.sh\""]
+CMD ["sh", "-c", "sh \"$CEMOD_SDK_ROOT/infra/docker/container/container-build-wups.sh\""]
