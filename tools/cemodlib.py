@@ -8,23 +8,32 @@ does not contain or execute WiiUPluginLoaderBackend code.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import pathlib
 import re
 import struct
+import unicodedata
+import urllib.parse
 import zipfile
 import zlib
 from dataclasses import dataclass
 from typing import Any
 
 
-MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
-MAX_EXPANDED_BYTES = 64 * 1024 * 1024
+MAX_ARCHIVE_BYTES = 97 * 1024 * 1024
+MAX_EXPANDED_BYTES = 97 * 1024 * 1024
 MAX_PAYLOAD_BYTES = 64 * 1024 * 1024
 MAX_MANIFEST_BYTES = 256 * 1024
 MAX_TRUSTED_ELF_BYTES = 10 * 1024 * 1024
 MAX_COMPRESSION_RATIO = 200
 MAX_SECTIONS = 512
+MAX_UI_FILES = 512
+MAX_UI_FILE_BYTES = 16 * 1024 * 1024
+MAX_UI_BYTES = 32 * 1024 * 1024
+MAX_PACKAGE_ENTRIES = MAX_UI_FILES + len({
+    "manifest.json", "mod.elf", "plugin.wps", "public_key.ed25519", "signature.ed25519",
+})
 ALLOWED_ENTRIES = {
     "manifest.json", "mod.elf", "plugin.wps",
     "public_key.ed25519", "signature.ed25519",
@@ -105,19 +114,133 @@ def _normalize_entry(name: str) -> str:
             continue
         if any(ord(character) < 0x20 or ord(character) == 0x7F for character in component):
             raise CemodError("package contains an unsafe entry name")
-        result.append(component.lower())
+        if component != unicodedata.normalize("NFC", component):
+            raise CemodError("package contains a non-canonical Unicode entry name")
+        result.append(component.casefold())
     if not result or name.endswith("/"):
         raise CemodError("package contains an unsafe entry name")
     return "/".join(result)
+
+
+def _allowed_entry(name: str) -> bool:
+    return name in ALLOWED_ENTRIES or name.startswith("ui/")
+
+
+def _canonical_origin(value: Any, schemes: set[str]) -> str | None:
+    """Return the canonical identity of an exact, path-free HTTPS/WSS origin."""
+    if (not isinstance(value, str) or not value.isascii() or len(value) > 2048 or
+            "\\" in value):
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return None
+    if (parsed.scheme not in schemes or parsed.username is not None or parsed.password is not None or
+            not parsed.hostname or parsed.path or parsed.query or parsed.fragment):
+        return None
+    host = parsed.hostname.lower()
+    try:
+        address = ipaddress.ip_address(host)
+        host_identity = f"[{address.compressed}]" if address.version == 6 else address.compressed
+    except ValueError:
+        if (host.startswith(".") or host.endswith(".") or ".." in host or len(host) > 253 or
+                any(not label or len(label) > 63 or label.startswith("-") or label.endswith("-") or
+                    re.fullmatch(r"[A-Za-z0-9-]+", label) is None for label in host.split("."))):
+            return None
+        host_identity = host
+    effective_port = port if port is not None else 443
+    if not 1 <= effective_port <= 65535:
+        return None
+    return f"{parsed.scheme}://{host_identity}:{effective_port}"
+
+
+def _validate_web_ui(web_ui: Any, requested: set[str]) -> None:
+    if not isinstance(web_ui, dict) or not set(web_ui) <= {"bridge_version", "views", "network"}:
+        raise CemodError("web_ui contains an unknown field")
+    if web_ui.get("bridge_version") != 1 or isinstance(web_ui.get("bridge_version"), bool):
+        raise CemodError("web_ui.bridge_version must be 1")
+    views = web_ui.get("views")
+    if not isinstance(views, dict) or not 1 <= len(views) <= 16:
+        raise CemodError("web_ui.views must contain between 1 and 16 views")
+    for view_id, view in views.items():
+        if not _identifier(view_id) or view_id.startswith("cemu.") or not isinstance(view, dict):
+            raise CemodError("web_ui contains an invalid view ID")
+        allowed = {"entry", "single_instance", "modes", "window", "overlay"}
+        if not set(view) <= allowed or not isinstance(view.get("entry"), str):
+            raise CemodError(f"web_ui view {view_id!r} contains an unknown field or invalid entry")
+        entry = view["entry"]
+        try:
+            normalized_entry = _normalize_entry(entry)
+        except CemodError:
+            raise CemodError(f"web_ui view {view_id!r} has an unsafe entry") from None
+        if normalized_entry != entry.casefold() or not entry.startswith("ui/") or not entry.casefold().endswith(".html"):
+            raise CemodError(f"web_ui view {view_id!r} entry must be an HTML file below ui/")
+        if "single_instance" in view and not isinstance(view["single_instance"], bool):
+            raise CemodError(f"web_ui view {view_id!r} single_instance must be boolean")
+        modes = view.get("modes")
+        if (not isinstance(modes, list) or not modes or len(modes) != len(set(modes)) or
+                any(mode not in {"window", "overlay"} for mode in modes)):
+            raise CemodError(f"web_ui view {view_id!r} modes are invalid")
+        if ("window" in modes) != ("window" in view) or ("overlay" in modes) != ("overlay" in view):
+            raise CemodError(f"web_ui view {view_id!r} mode descriptors do not match modes")
+        if "window" in view:
+            window = view["window"]
+            fields = {"title", "width", "height", "min_width", "min_height", "resizable"}
+            if not isinstance(window, dict) or not set(window) <= fields:
+                raise CemodError(f"web_ui view {view_id!r} window descriptor is invalid")
+            if "title" in window and not _safe_text(window["title"], 256):
+                raise CemodError(f"web_ui view {view_id!r} window title is invalid")
+            for name in ("width", "height", "min_width", "min_height"):
+                if name in window and (not _uint(window[name]) or not 1 <= window[name] <= 16384):
+                    raise CemodError(f"web_ui view {view_id!r} window {name} is invalid")
+            if ("width" in window and "min_width" in window and window["min_width"] > window["width"]) or \
+                    ("height" in window and "min_height" in window and
+                     window["min_height"] > window["height"]):
+                raise CemodError(f"web_ui view {view_id!r} minimum window size exceeds its initial size")
+            if "resizable" in window and not isinstance(window["resizable"], bool):
+                raise CemodError(f"web_ui view {view_id!r} window resizable must be boolean")
+        if "overlay" in view:
+            overlay = view["overlay"]
+            if (not isinstance(overlay, dict) or not set(overlay) <=
+                    {"surfaces", "transparent", "interactive"}):
+                raise CemodError(f"web_ui view {view_id!r} overlay descriptor is invalid")
+            surfaces = overlay.get("surfaces")
+            if (not isinstance(surfaces, list) or not surfaces or len(surfaces) != len(set(surfaces)) or
+                    any(surface not in {"tv", "drc"} for surface in surfaces)):
+                raise CemodError(f"web_ui view {view_id!r} overlay surfaces are invalid")
+            for name in ("transparent", "interactive"):
+                if name in overlay and not isinstance(overlay[name], bool):
+                    raise CemodError(f"web_ui view {view_id!r} overlay {name} must be boolean")
+
+    network = web_ui.get("network")
+    if network is not None:
+        allowed = {"connect", "resources", "credentials", "persistent_storage", "allow_private_network"}
+        if not isinstance(network, dict) or not set(network) <= allowed:
+            raise CemodError("web_ui.network contains an unknown field")
+        for name, schemes in (("connect", {"https", "wss"}), ("resources", {"https"})):
+            origins = network.get(name, [])
+            canonical = [_canonical_origin(value, schemes) for value in origins] \
+                if isinstance(origins, list) else []
+            if (not isinstance(origins, list) or len(origins) > 128 or any(value is None for value in canonical) or
+                    len(canonical) != len(set(canonical))):
+                raise CemodError(f"web_ui.network.{name} is invalid")
+        for name in ("credentials", "persistent_storage", "allow_private_network"):
+            if name in network and not isinstance(network[name], bool):
+                raise CemodError(f"web_ui.network.{name} must be boolean")
+        uses_network = bool(network.get("connect") or network.get("resources") or
+                            network.get("credentials") or network.get("allow_private_network"))
+        if uses_network and "network" not in requested:
+            raise CemodError("web_ui network access requires the network permission")
 
 
 def validate_manifest(manifest: dict[str, Any]) -> tuple[str, str]:
     if not isinstance(manifest, dict):
         raise CemodError("manifest.json must contain an object")
     package_version = manifest.get("package_version")
-    if (isinstance(package_version, bool) or package_version not in (1, 2, 3) or
+    if (isinstance(package_version, bool) or package_version not in (1, 2, 3, 4) or
             isinstance(manifest.get("api_version"), bool) or manifest.get("api_version") != 2):
-        raise CemodError("manifest requires package_version 1, 2 or 3 and api_version 2")
+        raise CemodError("manifest requires package_version 1, 2, 3 or 4 and api_version 2")
     if manifest.get("execution_mode") not in ("isolated", "trusted_native"):
         raise CemodError("execution_mode must be isolated or trusted_native")
     if not _identifier(manifest.get("mod_id", "")):
@@ -141,9 +264,18 @@ def validate_manifest(manifest: dict[str, Any]) -> tuple[str, str]:
     requested = manifest.get("requested_permissions")
     if (not isinstance(requested, list) or any(not isinstance(value, str) for value in requested) or
             len(requested) != len(set(requested)) or
-            any(value not in {"read", "write", "inject", "clipboard", "capture", "network"}
+            any(value not in {"read", "write", "inject", "clipboard", "capture", "network", "ui"}
                 for value in requested)):
         raise CemodError("requested_permissions is invalid")
+    requested_set = set(requested)
+    if "ui" in requested_set and package_version < 4:
+        raise CemodError("ui permission requires package_version 4")
+    if package_version < 4 and "web_ui" in manifest:
+        raise CemodError("web_ui requires package_version 4")
+    if package_version == 4:
+        if "ui" not in requested_set or "web_ui" not in manifest:
+            raise CemodError("package_version 4 requires ui permission and web_ui")
+        _validate_web_ui(manifest["web_ui"], requested_set)
 
     if package_version == 1:
         if any(name in manifest for name in ("payload", "scope", "permissions")):
@@ -763,22 +895,35 @@ def read_package(path: pathlib.Path) -> PackageContents:
     try:
         with zipfile.ZipFile(path) as archive:
             infos = archive.infolist()
-            if not 0 < len(infos) <= 256:
+            if not 0 < len(infos) <= MAX_PACKAGE_ENTRIES:
                 raise CemodError("package entry count is invalid")
             entries: dict[str, bytes] = {}
             normalized: set[str] = set()
             expanded = 0
+            ui_files = 0
+            ui_bytes = 0
             for info in infos:
                 key = _normalize_entry(info.filename)
+                if info.filename.startswith("ui/") and key != info.filename.casefold():
+                    raise CemodError("package contains a non-canonical UI entry name")
                 if key in normalized:
                     raise CemodError("package contains a duplicate normalized entry")
                 normalized.add(key)
                 if info.filename in entries:
                     raise CemodError("package contains a duplicate entry")
-                if info.filename not in ALLOWED_ENTRIES:
+                if not _allowed_entry(info.filename):
                     raise CemodError(f"package contains unknown mandatory entry {info.filename!r}")
+                unix_kind = (info.external_attr >> 16) & 0o170000
+                if unix_kind not in (0, 0o100000):
+                    raise CemodError("package contains a non-regular entry")
                 if info.flag_bits & 1 or info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
                     raise CemodError("package entry uses encryption or unsupported compression")
+                if info.filename.startswith("ui/"):
+                    ui_files += 1
+                    ui_bytes += info.file_size
+                    if (ui_files > MAX_UI_FILES or info.file_size > MAX_UI_FILE_BYTES or
+                            ui_bytes > MAX_UI_BYTES):
+                        raise CemodError("package UI files exceed count or size limits")
                 if info.file_size > MAX_EXPANDED_BYTES - expanded or \
                         (info.file_size and not info.compress_size) or \
                         (info.file_size > 4096 and (info.file_size - 1) // info.compress_size >= MAX_COMPRESSION_RATIO):
@@ -799,6 +944,9 @@ def read_package(path: pathlib.Path) -> PackageContents:
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
         raise CemodError(f"manifest.json is malformed: {error}") from None
     payload_format, payload_path = validate_manifest(manifest)
+    ui_entries = {name for name in entries if name.startswith("ui/")}
+    if manifest["package_version"] != 4 and ui_entries:
+        raise CemodError("UI files require package_version 4")
     present = [name for name in ("mod.elf", "plugin.wps") if name in entries]
     if present != [payload_path]:
         raise CemodError("package must contain exactly the payload selected by the manifest")
@@ -807,6 +955,12 @@ def read_package(path: pathlib.Path) -> PackageContents:
     if "public_key.ed25519" in entries and (len(entries["public_key.ed25519"]) != 32 or
             len(entries["signature.ed25519"]) != 64):
         raise CemodError("Ed25519 material has an invalid size")
+    if manifest["package_version"] == 4:
+        if not ui_entries:
+            raise CemodError("package_version 4 package contains no UI files")
+        for view_id, view in manifest["web_ui"]["views"].items():
+            if view["entry"] not in ui_entries:
+                raise CemodError(f"web_ui view {view_id!r} entry is missing from the package")
     payload = entries[payload_path]
     if not 0 < len(payload) <= MAX_PAYLOAD_BYTES:
         raise CemodError("payload size is invalid")

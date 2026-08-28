@@ -8,8 +8,10 @@ import subprocess
 import tempfile
 import zipfile
 
-from cemodlib import (CemodError, MAX_MANIFEST_BYTES, _reject_json_constant,
-                      canonical_signature_digest, inspect_wups, validate_elf, validate_manifest)
+from cemodlib import (CemodError, MAX_MANIFEST_BYTES, MAX_UI_BYTES,
+                      MAX_UI_FILE_BYTES, MAX_UI_FILES, _normalize_entry,
+                      _reject_json_constant, canonical_signature_digest,
+                      inspect_wups, validate_elf, validate_manifest)
 
 
 ED25519_DER_PREFIX = bytes.fromhex("302a300506032b6570032100")
@@ -20,6 +22,41 @@ def read_file(path: pathlib.Path, description: str) -> bytes:
         return path.read_bytes()
     except OSError as error:
         raise CemodError(f"cannot read {description}: {error}") from None
+
+
+def read_ui(directory: pathlib.Path) -> dict[str, bytes]:
+    if not directory.is_dir() or directory.is_symlink():
+        raise CemodError("UI directory is missing, not a directory, or a symbolic link")
+    result: dict[str, bytes] = {}
+    normalized: set[str] = set()
+    total = 0
+    try:
+        paths = sorted(directory.rglob("*"), key=lambda value: value.as_posix())
+    except OSError as error:
+        raise CemodError(f"cannot enumerate UI directory: {error}") from None
+    for path in paths:
+        if path.is_symlink():
+            raise CemodError(f"UI contains a symbolic link: {path}")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise CemodError(f"UI contains a non-regular file: {path}")
+        relative = path.relative_to(directory).as_posix()
+        entry = f"ui/{relative}"
+        key = _normalize_entry(entry)
+        if key != entry.lower() or key in normalized:
+            raise CemodError(f"UI contains an unsafe or duplicate normalized path: {relative}")
+        normalized.add(key)
+        data = read_file(path, f"UI file {relative}")
+        if len(data) > MAX_UI_FILE_BYTES:
+            raise CemodError(f"UI file exceeds the 16 MiB limit: {relative}")
+        total += len(data)
+        if len(result) >= MAX_UI_FILES or total > MAX_UI_BYTES:
+            raise CemodError("UI files exceed count or total size limits")
+        result[entry] = data
+    if not result:
+        raise CemodError("UI directory does not contain any files")
+    return result
 
 
 def sign(entries: dict[str, bytes], private_key: pathlib.Path) -> tuple[bytes, bytes]:
@@ -79,6 +116,8 @@ def main() -> None:
     payload.add_argument("--wps", type=pathlib.Path, help="compatibility alias for --payload-format wups")
     payload.add_argument("--payload", type=pathlib.Path)
     parser.add_argument("--payload-format", choices=("cemod_elf", "wups"))
+    parser.add_argument("--ui-dir", type=pathlib.Path,
+                        help="directory whose contents are packaged below ui/")
     parser.add_argument("--output", required=True, type=pathlib.Path)
     parser.add_argument("--private-key", type=pathlib.Path, help="Ed25519 PEM private key")
     parser.add_argument("--public-key", type=pathlib.Path, help="raw 32-byte Ed25519 key")
@@ -115,9 +154,19 @@ def main() -> None:
         else:
             validate_elf(payload_data)
 
+        if manifest["package_version"] == 4 and args.ui_dir is None:
+            raise CemodError("package_version 4 requires --ui-dir")
+        if manifest["package_version"] != 4 and args.ui_dir is not None:
+            raise CemodError("--ui-dir requires package_version 4")
+
         encoded_manifest = (json.dumps(manifest, ensure_ascii=False, sort_keys=True,
                                        separators=(",", ":")) + "\n").encode("utf-8")
         entries = {"manifest.json": encoded_manifest, manifest_path: payload_data}
+        if args.ui_dir is not None:
+            entries.update(read_ui(args.ui_dir))
+            for view_id, view in manifest["web_ui"]["views"].items():
+                if view["entry"] not in entries:
+                    raise CemodError(f"web_ui view {view_id!r} entry is missing from --ui-dir")
         detached = args.public_key is not None or args.signature is not None
         if args.private_key and detached:
             raise CemodError("--private-key cannot be combined with detached signature options")

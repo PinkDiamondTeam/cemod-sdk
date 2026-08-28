@@ -41,6 +41,7 @@ CEMOD_WPS             ?= $(PROJECT_ROOT)/build/plugin.wps
 CEMOD_PRIVATE_KEY     ?=
 CEMOD_PUBLIC_KEY      ?=
 CEMOD_SIGNATURE       ?=
+CEMOD_UI_DIR          ?=
 
 CEMOD_EXTRA_DEFINES       ?=
 CEMOD_EXTRA_CFLAGS        ?=
@@ -142,6 +143,9 @@ endif
 CEMOD_SIGN_ARGS := --private-key "$(CEMOD_PRIVATE_KEY)"
 else ifneq ($(strip $(CEMOD_PUBLIC_KEY)$(CEMOD_SIGNATURE)),)
 CEMOD_SIGN_ARGS := --public-key "$(CEMOD_PUBLIC_KEY)" --signature "$(CEMOD_SIGNATURE)"
+endif
+ifneq ($(strip $(CEMOD_UI_DIR)),)
+CEMOD_UI_ARGS := --ui-dir "$(CEMOD_UI_DIR)"
 endif
 # Merge rather than overwrite: third-party *.mk helpers included by the
 # project before cemod.mk (libhookevent.mk, libcemuextend.mk, ...) commonly
@@ -288,6 +292,7 @@ print-project-config:
 		'ELF_PATH=$(ELF_PATH)' \
 		'CEMOD_PAYLOAD_FORMAT=$(CEMOD_PAYLOAD_FORMAT)' \
 		'CEMOD_PAYLOAD_SOURCE=$(CEMOD_PAYLOAD_SOURCE)' \
+		'CEMOD_UI_DIR=$(CEMOD_UI_DIR)' \
 		'PACKAGE_PATH=$(PACKAGE_PATH)'
 
 ifeq ($(CEMOD_PAYLOAD_FORMAT),wups)
@@ -300,7 +305,7 @@ package: all
 	@mkdir -p "$(DIST_ROOT)"
 	@$(PYTHON) "$(CEMOD_SDK_ROOT)/tools/package_cemod.py" --manifest "$(CEMOD_MANIFEST)" \
 		$(CEMOD_PACKAGE_PAYLOAD_ARG) "$(CEMOD_PAYLOAD_SOURCE)" \
-		--output "$(PACKAGE_PATH)" $(CEMOD_SIGN_ARGS)
+		--output "$(PACKAGE_PATH)" $(CEMOD_UI_ARGS) $(CEMOD_SIGN_ARGS)
 	@$(MAKE) verify-package
 	@echo "Packaged $(PACKAGE_PATH)"
 

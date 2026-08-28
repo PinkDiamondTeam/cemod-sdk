@@ -45,6 +45,42 @@ def manifest(version=2, payload_format="wups"):
     return result
 
 
+def web_manifest():
+    result = manifest()
+    result["package_version"] = 4
+    result["requested_permissions"] = ["ui", "network"]
+    result["web_ui"] = {
+        "bridge_version": 1,
+        "views": {
+            "main": {
+                "entry": "ui/main/index.html",
+                "single_instance": True,
+                "modes": ["window"],
+                "window": {
+                    "title": "SDK Web UI", "width": 960, "height": 540,
+                    "min_width": 480, "min_height": 270, "resizable": True,
+                },
+            },
+            "overlay": {
+                "entry": "ui/overlay/index.html",
+                "single_instance": True,
+                "modes": ["overlay"],
+                "overlay": {
+                    "surfaces": ["tv", "drc"], "transparent": True,
+                    "interactive": False,
+                },
+            },
+        },
+        "network": {
+            "connect": ["https://api.example.com", "wss://stream.example.com"],
+            "resources": ["https://cdn.example.com"],
+            "credentials": False, "persistent_storage": False,
+            "allow_private_network": False,
+        },
+    }
+    return result
+
+
 def wps_image(metadata=b"name=SDK Test\0author=Test\0version=1.0\0license=MIT\0"
                        b"description=Fixture\0wups=0.9.1\0buildtimestamp=Jul 23 2026\0"
                        b"storage_id=sdk.test\0", hook=17):
@@ -207,6 +243,30 @@ class ManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(CemodError, "package_version 3"):
             validate_manifest(value)
 
+    def test_v4_web_ui(self):
+        self.assertEqual(validate_manifest(web_manifest()), ("wups", "plugin.wps"))
+        for mutation, message in (
+            (lambda value: value["requested_permissions"].remove("ui"), "ui permission"),
+            (lambda value: value["web_ui"].update(bridge_version=True), "bridge_version"),
+            (lambda value: value["web_ui"]["views"]["main"].update(entry="../index.html"), "entry"),
+            (lambda value: value["web_ui"]["views"]["main"]["window"].update(min_width=961), "minimum"),
+            (lambda value: value["web_ui"]["network"].update(connect=["http://example.com"]), "connect"),
+        ):
+            value = web_manifest()
+            mutation(value)
+            with self.subTest(message=message), self.assertRaisesRegex(CemodError, message):
+                validate_manifest(value)
+
+    def test_web_ui_version_and_network_permissions(self):
+        value = manifest()
+        value["requested_permissions"] = ["ui"]
+        with self.assertRaisesRegex(CemodError, "package_version 4"):
+            validate_manifest(value)
+        value = web_manifest()
+        value["requested_permissions"].remove("network")
+        with self.assertRaisesRegex(CemodError, "network permission"):
+            validate_manifest(value)
+
 
 class WupsTests(unittest.TestCase):
     def test_valid_inspection(self):
@@ -257,6 +317,95 @@ class PackageTests(unittest.TestCase):
         result = read_package(path)
         self.assertEqual(result.payload_format, "wups")
         self.assertEqual(result.wups["metadata"]["name"], "SDK Test")
+
+    def test_v4_package_contains_registered_ui_entries(self):
+        value = web_manifest()
+        entries = [
+            ("manifest.json", json.dumps(value).encode()), ("plugin.wps", self.wps),
+            ("ui/main/index.html", b"<main>Main</main>"),
+            ("ui/main/assets/index.js", b"window.cemod.ready()"),
+            ("ui/overlay/index.html", b"<main>Overlay</main>"),
+        ]
+        package = read_package(self.package("web-ui", entries))
+        self.assertEqual(package.entries["ui/main/index.html"], b"<main>Main</main>")
+        self.assertIn("ui/overlay/index.html", package.entries)
+
+        missing = entries[:-1]
+        with self.assertRaisesRegex(CemodError, "entry is missing"):
+            read_package(self.package("web-ui-missing", missing))
+
+    def test_cli_packages_ui_deterministically_and_rejects_symlink(self):
+        manifest_path = self.root / "manifest.json"
+        wps_path = self.root / "plugin.wps"
+        ui_path = self.root / "ui"
+        (ui_path / "main/assets").mkdir(parents=True)
+        (ui_path / "overlay").mkdir()
+        (ui_path / "main/index.html").write_text("<main>Main</main>", encoding="utf-8")
+        (ui_path / "main/assets/index.js").write_text("window.cemod.ready()", encoding="utf-8")
+        (ui_path / "overlay/index.html").write_text("<main>Overlay</main>", encoding="utf-8")
+        manifest_path.write_text(json.dumps(web_manifest()), encoding="utf-8")
+        wps_path.write_bytes(self.wps)
+        command = [sys.executable, str(TOOLS / "package_cemod.py"),
+                   "--manifest", str(manifest_path), "--wps", str(wps_path),
+                   "--ui-dir", str(ui_path), "--output"]
+        first, second = self.root / "ui-first.cemod", self.root / "ui-second.cemod"
+        subprocess.run(command + [str(first)], check=True)
+        subprocess.run(command + [str(second)], check=True)
+        self.assertEqual(first.read_bytes(), second.read_bytes())
+        self.assertIn("ui/main/assets/index.js", read_package(first).entries)
+
+        (ui_path / "linked.js").symlink_to(ui_path / "main/assets/index.js")
+        failed = subprocess.run(command + [str(self.root / "linked.cemod")],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertNotEqual(failed.returncode, 0)
+
+    def test_v4_rejects_unsafe_and_oversized_ui(self):
+        value = web_manifest()
+        encoded = json.dumps(value).encode()
+        base = [("manifest.json", encoded), ("plugin.wps", self.wps),
+                ("ui/main/index.html", b"x"), ("ui/overlay/index.html", b"x")]
+        cases = {
+            "case-duplicate": base + [("ui/main/app.js", b"a"), ("ui/main/APP.js", b"b")],
+            "traversal": base + [("ui/../outside.js", b"x")],
+            "empty-component": base + [("ui//app.js", b"x")],
+            "dot-component": base + [("ui/./app.js", b"x")],
+            "oversized": base + [("ui/main/large.bin", b"x" * (16 * 1024 * 1024 + 1))],
+        }
+        for suffix, entries in cases.items():
+            with self.subTest(suffix=suffix), self.assertRaises(CemodError):
+                read_package(self.package(suffix, entries, zipfile.ZIP_STORED))
+
+    def test_legacy_packages_reject_ui_files(self):
+        entries = [("manifest.json", self.encoded), ("plugin.wps", self.wps),
+                   ("ui/unregistered.js", b"x")]
+        with self.assertRaisesRegex(CemodError, "package_version 4"):
+            read_package(self.package("legacy-ui", entries))
+
+    def test_v4_ui_file_count_boundary(self):
+        value = web_manifest()
+        required = [("ui/main/index.html", b""), ("ui/overlay/index.html", b"")]
+        assets = [(f"ui/main/assets/{index:03}.bin", b"") for index in range(510)]
+        base = [("manifest.json", json.dumps(value).encode()), ("plugin.wps", self.wps)]
+        self.assertEqual(len(read_package(self.package("ui-512", base + required + assets,
+                                                       zipfile.ZIP_STORED)).entries), 514)
+        with self.assertRaisesRegex(CemodError, "count|size"):
+            read_package(self.package("ui-513", base + required + assets +
+                                      [("ui/main/assets/overflow.bin", b"")], zipfile.ZIP_STORED))
+
+    def test_v4_rejects_zip_symlink(self):
+        path = self.root / "symlink.cemod"
+        value = web_manifest()
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("manifest.json", json.dumps(value))
+            archive.writestr("plugin.wps", self.wps)
+            archive.writestr("ui/main/index.html", "x")
+            archive.writestr("ui/overlay/index.html", "x")
+            info = zipfile.ZipInfo("ui/main/link.js")
+            info.create_system = 3
+            info.external_attr = 0o120777 << 16
+            archive.writestr(info, "target.js")
+        with self.assertRaisesRegex(CemodError, "non-regular"):
+            read_package(path)
 
     def test_payload_missing_multiple_and_mismatch(self):
         for suffix, entries in (
@@ -317,7 +466,7 @@ class PackageTests(unittest.TestCase):
     def test_oversized_archive_and_malformed_json(self):
         oversized = self.root / "oversized.cemod"
         with oversized.open("wb") as output:
-            output.seek(64 * 1024 * 1024)
+            output.seek(97 * 1024 * 1024)
             output.write(b"x")
         with self.assertRaisesRegex(CemodError, "size"):
             read_package(oversized)
@@ -337,6 +486,7 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(digest, hashlib.sha256(canonical).digest())
         self.assertNotEqual(digest, canonical_signature_digest({"manifest.json": b"{}", "mod.elf": b"payload"}))
         self.assertNotEqual(digest, canonical_signature_digest({"manifest.json": b"{}", "plugin.wps": b"payload!"}))
+        self.assertNotEqual(digest, canonical_signature_digest({**entries, "ui/main/index.html": b"<main/>"}))
 
     @unittest.skipUnless(subprocess.run(["openssl", "version"], stdout=subprocess.DEVNULL).returncode == 0,
                          "OpenSSL is required")
@@ -366,6 +516,33 @@ class PackageTests(unittest.TestCase):
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.assertNotEqual(failed.returncode, 0)
         self.assertEqual(output_path.read_bytes(), original)
+
+    @unittest.skipUnless(subprocess.run(["openssl", "version"], stdout=subprocess.DEVNULL).returncode == 0,
+                         "OpenSSL is required")
+    def test_signed_v4_package_commits_ui_bytes(self):
+        manifest_path = self.root / "manifest.json"
+        wps_path = self.root / "plugin.wps"
+        key_path = self.root / "private.pem"
+        ui_path = self.root / "ui"
+        (ui_path / "main").mkdir(parents=True)
+        (ui_path / "overlay").mkdir()
+        (ui_path / "main/index.html").write_text("<main>signed</main>", encoding="utf-8")
+        (ui_path / "overlay/index.html").write_text("<main>overlay</main>", encoding="utf-8")
+        manifest_path.write_text(json.dumps(web_manifest()), encoding="utf-8")
+        wps_path.write_bytes(self.wps)
+        subprocess.run(["openssl", "genpkey", "-algorithm", "ED25519", "-out", str(key_path)],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        package_path = self.root / "signed-ui.cemod"
+        subprocess.run([sys.executable, str(TOOLS / "package_cemod.py"),
+                        "--manifest", str(manifest_path), "--wps", str(wps_path),
+                        "--ui-dir", str(ui_path), "--private-key", str(key_path),
+                        "--output", str(package_path)], check=True)
+        package = read_package(package_path)
+        verify_signature(package.entries)
+        modified = dict(package.entries)
+        modified["ui/main/index.html"] += b"!"
+        with self.assertRaisesRegex(CemodError, "signature"):
+            verify_signature(modified)
 
     def test_cross_repo_cemu_extend_accepts_wps_and_signature(self):
         wups_binary = os.environ.get("CEMUEXTEND_WUPS_BINARY")
