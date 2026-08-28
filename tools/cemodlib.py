@@ -102,7 +102,8 @@ def _reject_json_constant(value: str) -> None:
 
 
 def _normalize_entry(name: str) -> str:
-    if not name or len(name) > 255 or "\\" in name or "\0" in name or name.startswith("/"):
+    if (not name or len(name) > 255 or not name.isascii() or "\\" in name or
+            "\0" in name or name.startswith("/")):
         raise CemodError("package contains an unsafe entry name")
     if len(name) >= 2 and name[0].isalpha() and name[1] == ":":
         raise CemodError("package contains an absolute entry name")
@@ -137,7 +138,8 @@ def _canonical_origin(value: Any, schemes: set[str]) -> str | None:
     except ValueError:
         return None
     if (parsed.scheme not in schemes or parsed.username is not None or parsed.password is not None or
-            not parsed.hostname or parsed.path or parsed.query or parsed.fragment):
+            not parsed.hostname or parsed.netloc.endswith(":") or parsed.path or parsed.query or
+            parsed.fragment):
         return None
     host = parsed.hostname.lower()
     try:

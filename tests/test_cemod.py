@@ -251,6 +251,7 @@ class ManifestTests(unittest.TestCase):
             (lambda value: value["web_ui"]["views"]["main"].update(entry="../index.html"), "entry"),
             (lambda value: value["web_ui"]["views"]["main"]["window"].update(min_width=961), "minimum"),
             (lambda value: value["web_ui"]["network"].update(connect=["http://example.com"]), "connect"),
+            (lambda value: value["web_ui"]["network"].update(connect=["https://example.com:"]), "connect"),
         ):
             value = web_manifest()
             mutation(value)
@@ -369,6 +370,7 @@ class PackageTests(unittest.TestCase):
             "traversal": base + [("ui/../outside.js", b"x")],
             "empty-component": base + [("ui//app.js", b"x")],
             "dot-component": base + [("ui/./app.js", b"x")],
+            "unicode": base + [("ui/caf\u00e9.css", b"x")],
             "oversized": base + [("ui/main/large.bin", b"x" * (16 * 1024 * 1024 + 1))],
         }
         for suffix, entries in cases.items():
