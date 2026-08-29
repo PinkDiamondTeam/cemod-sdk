@@ -1,267 +1,133 @@
 # cemod-sdk
 
-Reusable build / verify / package toolchain for Wii U `trusted_native`
-`.cemod` mods. Package version 1 `mod.elf` remains the default; package versions
-2 and 3 can select either `mod.elf` or a strict Wii U RPL-derived `plugin.wps`
-payload, and package version 4 can additionally carry signed Web UI assets. It provides:
+`cemod-sdk` is the build, validation, and packaging toolchain for CemuExtend
+`.cemod` mods. It supports both CemuExtend trusted-native ELF payloads and Wii U
+Plugin System (`.wps`) payloads without mixing packaging code into each mod
+repository.
 
-- PowerPC ET_DYN codegen flags and link script (`config/link.ld`) for the
-  CemuExtend trusted-native ABI (bootstrap `.cemod.bootstrap` / CMB1 section,
-  malloc `--wrap=` set, `-fshort-wchar`, no-writable-executable segments).
-- `.cemod` packaging (`tools/package_cemod.py`) and verification
-  (`tools/verify_cemod.py`, `tools/normalize_relocations.py`).
-- Host-side WPS validation and inspection (`tools/verify_wups.py`,
-  `tools/inspect_wups.py`), including metadata, hooks, replacements,
-  imports/exports, process targets, relocations, TLS, fixed-address patches,
-  inferred permissions, and manifest mismatches.
-- A reproducible Docker build (`infra/docker/`) that vendors a
-  codecave-safe, short-`wchar_t` devkitPPC/newlib/libstdc++ toolchain.
-- `cemod.mk`: a GNU Make include that wires all of the above into a
-  consuming project's Makefile.
+The SDK provides:
 
-Project-specific things (game hook addresses, CMB1 records, source, manifest
-contents) stay in the consuming project. Notably `startup.h`'s bootstrap
-entry stub is **not** in this SDK: its CMB1 records encode a specific game's
-hooked instruction address/CRC/handler, so it is inherently per-project; see
-`mcwiiu-client-template/include/code/startup.h` for the reference shape this
-SDK's `config/link.ld` expects (a `.cemod.bootstrap` section built with the
-`CMB1` header format checked by `tools/verify_cemod.py`).
+- a PowerPC ET_DYN link configuration for trusted-native `mod.elf` payloads;
+- deterministic `.cemod` packaging and strict host-side verification;
+- WPS/RPL validation and inspection;
+- optional Ed25519 package signing;
+- package-version-4 Web UI asset packaging; and
+- reproducible Docker builders for the trusted-native and WUPS toolchains.
 
-## Usage
+Package version 1 uses the legacy `mod.elf` layout. Versions 2 and 3 select
+`mod.elf` or `plugin.wps` with an explicit payload descriptor. Version 4 adds
+Web UI assets, which are covered when package signing is enabled. All
+supported manifests use CemuExtend API version 2.
+
+## Requirements
+
+The exact requirements depend on the workflow:
+
+- Python 3 is required by all packaging and verification tools.
+- GNU Make, devkitPro/devkitPPC, and the SDK's codecave-safe toolchain are
+  required for a local trusted-native ELF build.
+- CMake 3.20 or newer can package an existing payload target.
+- Docker with Docker Compose is recommended for reproducible builds and does
+  not require a host devkitPro installation.
+- OpenSSL is required only when creating or verifying Ed25519 signatures.
+
+See [Getting started](docs/getting-started.md) for integration options and
+[Docker builds](docs/docker-build.md) for the reproducible toolchain setup.
+
+## GNU Make quick start
+
+Set every `CEMOD_*` variable before including `cemod.mk`; GNU Make expands
+source discovery and prerequisites while parsing the file.
 
 ```make
 MAKEFILE_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 PROJECT_ROOT := $(patsubst %/,%,$(MAKEFILE_DIR))
 
-CEMOD_SDK_ROOT ?= $(PROJECT_ROOT)/../cemod-sdk
-CEMOD_NAME     := mcwiiu-client
-CEMOD_SOURCES  := src
-CEMOD_MANIFEST := $(PROJECT_ROOT)/manifest.json
+CEMOD_SDK_ROOT ?= $(PROJECT_ROOT)/third_party/cemod-sdk
+CEMOD_NAME      := example-mod
+CEMOD_SOURCES   := src
+CEMOD_INCLUDES  := include
+CEMOD_MANIFEST  := $(PROJECT_ROOT)/manifest.json
 
 include $(CEMOD_SDK_ROOT)/cemod.mk
 ```
 
-For a WUPS project, the project still owns the rule that creates the `.wps`;
-the SDK validates and packages its output:
+Build, package, verify, and install the result with:
+
+```sh
+make package
+make verify-package
+make CEMU_DATA_DIR=/path/to/Cemu install
+```
+
+The package is written to `out/dist/example-mod.cemod`.
+
+For a WUPS payload built by the consuming project, select the existing `.wps`
+file before the include:
 
 ```make
 CEMOD_PAYLOAD_FORMAT := wups
-CEMOD_WPS            := $(PROJECT_ROOT)/build/plugin.wps
+CEMOD_WPS            := $(PROJECT_ROOT)/platforms/wups/example-mod.wps
 ```
 
-The legacy/default form is equivalent to:
+Then run `make package`, `make verify-wups`, or `make inspect-wups` as needed.
 
-```make
-CEMOD_PAYLOAD_FORMAT := cemod_elf
-CEMOD_ELF            := $(PROJECT_ROOT)/out/build/my-mod/my-mod.elf
-```
+## CMake quick start
 
-Package version 2 manifests must contain the exact descriptor
-`{"format":"wups","path":"plugin.wps"}` or
-`{"format":"cemod_elf","path":"mod.elf"}`. A version 1 manifest must omit
-`payload`, `scope`, and `permissions` and continues to select `mod.elf`.
-
-Package version 4 adds a validated `web_ui` descriptor and requires the `ui`
-permission. Point `CEMOD_UI_DIR` at a directory whose contents should appear
-below `ui/` in the archive. For example, `ui/main/index.html` is built from
-`$(CEMOD_UI_DIR)/main/index.html`:
-
-```make
-CEMOD_MANIFEST := $(PROJECT_ROOT)/manifest.json
-CEMOD_UI_DIR   := $(PROJECT_ROOT)/web-ui/dist
-```
-
-All UI files are covered by the same canonical Ed25519 signature as the
-manifest and payload. The packager rejects symbolic links, unsafe or
-normalization-colliding paths, missing view entry files, more than 512 UI
-files, files larger than 16 MiB, and UI data larger than 32 MiB.
-
-Every overlay descriptor must set `z_order` to either `below_builtin` or
-`above_builtin`. This controls whether the plugin overlay is composited below
-or above Cemu's built-in overlay, and applies to input/focus priority as well
-as drawing order.
-
-CMake consumers can include `cmake/CemodPackage.cmake` and package an existing
-payload target:
+`CemodPackage.cmake` packages an existing CMake payload target; it does not
+define how that target is compiled.
 
 ```cmake
 include(/path/to/cemod-sdk/cmake/CemodPackage.cmake)
+
 cemod_package(
   TARGET example_mod
   MANIFEST ${CMAKE_CURRENT_SOURCE_DIR}/manifest.json
-  UI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/web-ui/dist
   PAYLOAD_FORMAT wups
 )
 ```
 
-**Set every `CEMOD_*` variable before the `include` line.** GNU Make expands
-`wildcard()`/`foreach()` calls and rule prerequisites as it parses each
-line, so `cemod.mk`'s object-file discovery and link rules need their
-inputs to already hold final values when they are read. Order-independent
-things like `-D`/`-I` flag lists have `CEMOD_EXTRA_*` hooks (below) that
-help third-party `*.mk` snippets (which commonly do `INCLUDES += ...`
-against the plain `INCLUDES`/`SOURCES`/`DATA` names) merge in without extra
-plumbing -- `cemod.mk` merges those names into `CEMOD_INCLUDES`/
-`CEMOD_SOURCES`/`CEMOD_DATA` instead of overwriting them, so such helpers
-may be included either before or after `cemod.mk`.
+This adds an `example_mod_cemod` target and writes
+`example_mod.cemod` in the current binary directory by default.
 
-### Variable reference
+## Standalone tools
 
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `PROJECT_ROOT` | *(required)* | Absolute path to the consuming project |
-| `CEMOD_NAME` | *(required)* | Mod id / output file base name (`out/dist/$(CEMOD_NAME).cemod`) |
-| `CEMOD_SOURCES` | `src` | Source directories (space-separated, project-root-relative or absolute) |
-| `CEMOD_INCLUDES` | `include` | Extra include directories |
-| `CEMOD_DATA` | *(empty)* | Directories with embedded binary assets (`.png`/`.ttf`/`.gsh`/...) |
-| `CEMOD_MANIFEST` | `$(PROJECT_ROOT)/manifest.json` | Path to `manifest.json` |
-| `CEMOD_TARGET` | `$(CEMOD_NAME)` | ELF/target base name, if different from the mod name |
-| `CEMOD_PAYLOAD_FORMAT` | `cemod_elf` | `cemod_elf` or `wups`; this is independent of `execution_mode` |
-| `CEMOD_ELF` | generated `$(ELF_PATH)` | Existing CMB1 `mod.elf` payload |
-| `CEMOD_WPS` | `$(PROJECT_ROOT)/build/plugin.wps` | WUPS payload generated by the consuming project |
-| `CEMOD_PRIVATE_KEY` | *(empty)* | Optional Ed25519 PEM private key; package signing derives and embeds its raw public key |
-| `CEMOD_PUBLIC_KEY` / `CEMOD_SIGNATURE` | *(empty)* | Optional precomputed raw 32/64-byte detached signing material |
-| `CEMOD_UI_DIR` | *(empty)* | Directory recursively packaged below `ui/` for package version 4 |
-| `CEMOD_PROJECT_MAKEFILE` | `$(PROJECT_ROOT)/Makefile` | Makefile re-invoked for the recursive object-build pass |
-| `CEMOD_EXTRA_DEFINES` | *(empty)* | Extra `-D` flags (both C and C++) |
-| `CEMOD_EXTRA_CFLAGS` / `CEMOD_EXTRA_CXXFLAGS` | *(empty)* | Extra compiler flags |
-| `CEMOD_EXTRA_LDFLAGS` | *(empty)* | Extra linker flags |
-| `CEMOD_EXTRA_LIBS_GROUP` | *(empty)* | Extra libs inside the `--start-group`/`--end-group` |
-| `CEMOD_EXTRA_LIBS` | *(empty)* | Extra libs outside the group |
-| `CEMOD_EXTRA_LIBDIRS` | *(empty)* | Extra `-L`-style library root directories |
-| `CEMOD_EXCLUDE_CPPFILES` | *(empty)* | `.cpp` basenames to exclude from the auto-discovered source list |
-| `CEMOD_EXTRA_BUILD_DEPS` | *(empty)* | Extra prerequisites for the object-build recursion (e.g. a runtime archive target) |
-| `CEMOD_EXTRA_ELF_DEPS` | *(empty)* | Extra order-only prerequisites for the final `.elf` link |
-| `CEMOD_STDLIB_ROOT` | `$(DEVKITPRO)/mcwiiu-stdlib` | Short-`wchar_t` newlib/libstdc++ prefix |
-| `CEMOD_STDLIB_VERSION` | `14.2.0` | GCC/libstdc++ version under `CEMOD_STDLIB_ROOT` |
-| `CEMOD_STDLIB_ROOT_PATH` | `/vol/external01/$(CEMOD_NAME)` | On-console path baked into `-DMCWIIU_STDLIB_ROOT` |
-| `CEMOD_STDLIB_SELF_TEST` | `0` | `-DSTDLIB_SELF_TEST=` value |
-| `CEMOD_GCC` | `$(DEVKITPRO)/mcwiiu-gcc` | Codecave-safe GCC prefix (built by `infra/docker/image/build-short-wchar-stdlib.sh`) |
-| `USE_SYSTEM_STDLIB` | *(unset)* | `1` uses the stock devkitPPC stdlib for linker bring-up only; `verify-wchar`/`make package` reject it |
-| `DEVKITPPC` / `DEVKITPRO` | *(required, from env)* | Standard devkitPro locations |
+The Python tools can also package or inspect externally built payloads:
 
-### Targets
+```sh
+python3 tools/package_cemod.py \
+  --manifest manifest.json \
+  --wps build/example-mod.wps \
+  --output build/example-mod.cemod
 
-`build`, `all` (build the selected payload), `package` (build + package + verify),
-`verify-package`, `verify-wups`, `inspect-wups`, `verify-wchar`,
-`install` (copy into `$(CEMU_DATA_DIR)`),
-`clean`, `print-project-config`, and `docker-build` / `docker-install`
-(build inside Docker; see below). Target names and behavior are unchanged
-from the original `mcwiiu-client-template/Makefile`.
+python3 tools/verify_cemod.py --package build/example-mod.cemod
+python3 tools/verify_wups.py --wps build/example-mod.wps
+python3 tools/inspect_wups.py \
+  --wps build/example-mod.wps \
+  --manifest manifest.json
+```
 
-`package_cemod.py` writes a temporary ZIP and renames it only after every
-input validates. Its canonical Ed25519 digest sorts all entries except the
-signature and commits each UTF-8 entry name, uncompressed length, and SHA-256;
-therefore changing `mod.elf` to `plugin.wps`, truncating it, or changing any
-payload byte invalidates the signature. `verify_cemod.py` applies the same
-container limits used by CemuExtend: no absolute/traversal/normalized duplicate
-paths, no unknown mandatory entries, one selected payload, bounded expansion,
-and a 200:1 compression-ratio ceiling.
-
-Run the SDK regression suite with:
+Run the regression suite with:
 
 ```sh
 python3 -m unittest discover -s tests -v
 ```
 
-The suite runs a C++ cross-repository check automatically when the sibling
-`CemuExtend/build/nix/src/Cafe/wups_binary_tests` and
-`cemod_package_tests` binaries exist. Override their locations with
-`CEMUEXTEND_WUPS_BINARY` and `CEMUEXTEND_PACKAGE_BINARY`. The package test
-verifies that CemuExtend accepts the SDK's WPS fixture and Ed25519 package,
-including the canonical digest.
+## Documentation
 
-For an externally built public plugin, run:
+- [Getting started](docs/getting-started.md) — integration, payload workflows,
+  installation, and standalone tools.
+- [GNU Make configuration](docs/configuration.md) — all public variables,
+  extension hooks, and targets.
+- [Package format](docs/package-format.md) — manifests, payloads, signatures,
+  Web UI assets, and validation limits.
+- [Docker builds](docs/docker-build.md) — reproducible ELF and WUPS builders.
+- [WUPS support design](docs/wups-support-design.md) — the low-level parser and
+  runtime-boundary contract.
+- [SDK conformance tests](tests/README.md) — test and fuzz corpus details.
 
-```sh
-python3 tools/verify_wups.py --wps /path/to/plugin.wps
-python3 tools/inspect_wups.py --wps /path/to/plugin.wps --manifest manifest.json
-```
-
-`tests/fuzz_driver.py` is a dependency-free corpus smoke/fuzz entry point.
-The seeds under `tests/corpus/` are intentionally malformed and are expected
-to be rejected. See [docs/wups-support-design.md](docs/wups-support-design.md)
-for the binary contract, signature bytes, runtime boundary, and license
-boundary.
-
-The SDK does not execute guest PPC code and does not provide fake WUPS/WUMS
-success paths. WUPS lifecycle execution, guest callbacks, FunctionPatcher,
-WUMS module loading, Aroma HLE services, and GUI integration must be supplied
-by the Cemu runtime; an unsupported runtime capability remains an explicit
-compatibility error.
-
-## Docker build
-
-`docker-build` / `docker-install` do not require a local devkitPPC
-checkout -- the toolchain lives entirely in Docker images built from the
-single, multi-stage `infra/docker/image/Dockerfile`, selected via
-`--target`: `builder` (the trusted-native ELF payload; the default) and
-`wups-builder` (the WUPS plugin payload, layered on top of `builder`).
-`docker-install` builds first, then installs only the `.cemod` that build
-just produced (the plain one, or the `-wups`-suffixed one with
-`CEMOD_PAYLOAD_FORMAT=wups`) -- it never touches any other package that
-might already be sitting in `out/dist`.
-`infra/docker/` is laid out by *when* each piece runs:
-
-- `infra/docker/host/` -- scripts that run on the developer's machine:
-  `docker-build.sh` (the orchestrator) and `install-cemu-pack.sh`.
-- `infra/docker/image/` -- inputs baked into the Docker image at build
-  time: `Dockerfile` itself, plus `build-short-wchar-stdlib.sh` and its
-  patch, `COPY`'d in via the `sdk` build context.
-- `infra/docker/container/` -- drivers that run *inside* the container as
-  the image's `CMD`: `container-build.sh` (ELF) and
-  `container-build-wups.sh` (WUPS).
-
-A consuming project needs:
-
-- `compose.yaml` with `builder` and `wups-builder` services, both pointing
-  `build.dockerfile` at `${CEMOD_SDK_ROOT}/infra/docker/image/Dockerfile`
-  (with `build.target` set to the matching stage) and
-  `build.additional_contexts` mapping
-  `sdk: ${CEMOD_SDK_ROOT}/infra/docker/image` (BuildKit's multi-context
-  COPY, so the stdlib build script/patch don't need to be duplicated into
-  every project). Gate `wups-builder` behind `profiles: ["wups"]` so it's
-  excluded from a plain `docker compose build`/`up`.
-- A `volumes` entry bind-mounting `${CEMOD_SDK_ROOT}:${CEMOD_SDK_ROOT}:ro`
-  in addition to the project root, so the in-container `make` invocation
-  can `include $(CEMOD_SDK_ROOT)/cemod.mk` at the same absolute path as on
-  the host.
-- A vendored devkitPPC archive under the project (`infra/docker/vendor/devkitPPC/`,
-  referenced via `DEVKITPPC_ARCHIVE`/`DEVKITPPC_SHA256`), since that's a
-  large binary better kept per-project/cache than duplicated in the SDK.
-  Both services need it: the `wups-builder` image layers on top of `builder`.
-- A host-side entry point (see `mcwiiu-client-template/docker-build.sh`)
-  that exports `PROJECT_ROOT`, `CEMOD_SDK_ROOT`, `DEVKITPPC_ARCHIVE`,
-  `DEVKITPPC_SHA256`, and optionally `CEMOD_PREBUILD_CHECK` (a script for
-  project-specific preflight checks) and `CEMOD_EXTRA_VERIFY` (extra `make`
-  targets run in-container before packaging, e.g. a project's own SDK
-  header smoke test), then runs `infra/docker/host/docker-build.sh [--wups]`.
-
-See `mcwiiu-client-template/{compose.yaml,docker-build.sh,infra/docker/prebuild-check.sh}`
-for the reference wiring.
-
-## WUPS Docker build
-
-The `wups` payload format (`CEMOD_PAYLOAD_FORMAT=wups`) shares the Docker
-path above via the `wups-builder` stage/service and `docker-build.sh --wups`
-rather than duplicating it per project. That stage layers a WUPS toolchain
-(built from the project's own `WiiUPluginSystem` submodule; `elf2rpl`/
-`readrpl` already ship in the base image) on top of the `builder` stage,
-then `infra/docker/container/container-build-wups.sh` builds
-`platforms/wups/<target>.wps` and packages it with
-`make CEMOD_PAYLOAD_FORMAT=wups package`. A consuming project needs:
-
-- `third_party/toolchains/WiiUPluginSystem` submodule.
-- A `platforms/wups/Makefile` that builds `platforms/wups/<target>.{wps,elf}`
-  and `platforms/wups/<target>_dbg.wps` (see `aqua/platforms/wups/Makefile`).
-- `CEMOD_WPS` set to that `.wps` path when `CEMOD_PAYLOAD_FORMAT=wups` (see
-  the project's `Makefile`) -- `container-build-wups.sh` reads it back via
-  `make print-project-config CEMOD_PAYLOAD_FORMAT=wups` instead of
-  hardcoding a target name.
-- The `wups-builder` service in `compose.yaml` described above (`target:
-  wups-builder`, `profiles: ["wups"]`).
-- The same host-side entry point as the ELF path, invoked as
-  `./docker-build.sh --wups`.
-
-See `aqua/{compose.yaml,docker-build.sh,platforms/wups/Makefile}`
-for the reference wiring.
+`cemod-sdk` validates and packages guest code but does not execute it. WUPS
+lifecycle calls, FunctionPatcher, WUMS loading, HLE services, and GUI
+integration are CemuExtend runtime responsibilities. For the ABI 2 C++ client
+used by a payload, see
+[`libcemuextend`](https://github.com/CemuExtend/libcemuextend).
