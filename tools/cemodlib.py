@@ -205,12 +205,14 @@ def _validate_web_ui(web_ui: Any, requested: set[str]) -> None:
         if "overlay" in view:
             overlay = view["overlay"]
             if (not isinstance(overlay, dict) or not set(overlay) <=
-                    {"surfaces", "transparent", "interactive"}):
+                    {"surfaces", "z_order", "transparent", "interactive"}):
                 raise CemodError(f"web_ui view {view_id!r} overlay descriptor is invalid")
             surfaces = overlay.get("surfaces")
             if (not isinstance(surfaces, list) or not surfaces or len(surfaces) != len(set(surfaces)) or
                     any(surface not in {"tv", "drc"} for surface in surfaces)):
                 raise CemodError(f"web_ui view {view_id!r} overlay surfaces are invalid")
+            if overlay.get("z_order") not in {"below_builtin", "above_builtin"}:
+                raise CemodError(f"web_ui view {view_id!r} overlay z_order is invalid")
             for name in ("transparent", "interactive"):
                 if name in overlay and not isinstance(overlay[name], bool):
                     raise CemodError(f"web_ui view {view_id!r} overlay {name} must be boolean")

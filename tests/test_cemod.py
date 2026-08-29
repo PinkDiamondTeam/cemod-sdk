@@ -67,7 +67,7 @@ def web_manifest():
                 "modes": ["overlay"],
                 "overlay": {
                     "surfaces": ["tv", "drc"], "transparent": True,
-                    "interactive": False,
+                    "interactive": False, "z_order": "above_builtin",
                 },
             },
         },
@@ -250,6 +250,8 @@ class ManifestTests(unittest.TestCase):
             (lambda value: value["web_ui"].update(bridge_version=True), "bridge_version"),
             (lambda value: value["web_ui"]["views"]["main"].update(entry="../index.html"), "entry"),
             (lambda value: value["web_ui"]["views"]["main"]["window"].update(min_width=961), "minimum"),
+            (lambda value: value["web_ui"]["views"]["overlay"]["overlay"].pop("z_order"), "z_order"),
+            (lambda value: value["web_ui"]["views"]["overlay"]["overlay"].update(z_order="middle"), "z_order"),
             (lambda value: value["web_ui"]["network"].update(connect=["http://example.com"]), "connect"),
             (lambda value: value["web_ui"]["network"].update(connect=["https://example.com:"]), "connect"),
         ):
@@ -257,6 +259,10 @@ class ManifestTests(unittest.TestCase):
             mutation(value)
             with self.subTest(message=message), self.assertRaisesRegex(CemodError, message):
                 validate_manifest(value)
+
+        value = web_manifest()
+        value["web_ui"]["views"]["overlay"]["overlay"]["z_order"] = "below_builtin"
+        self.assertEqual(validate_manifest(value), ("wups", "plugin.wps"))
 
     def test_web_ui_version_and_network_permissions(self):
         value = manifest()

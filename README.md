@@ -76,6 +76,11 @@ manifest and payload. The packager rejects symbolic links, unsafe or
 normalization-colliding paths, missing view entry files, more than 512 UI
 files, files larger than 16 MiB, and UI data larger than 32 MiB.
 
+Every overlay descriptor must set `z_order` to either `below_builtin` or
+`above_builtin`. This controls whether the plugin overlay is composited below
+or above Cemu's built-in overlay, and applies to input/focus priority as well
+as drawing order.
+
 CMake consumers can include `cmake/CemodPackage.cmake` and package an existing
 payload target:
 
