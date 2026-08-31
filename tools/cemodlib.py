@@ -26,6 +26,10 @@ MAX_EXPANDED_BYTES = 97 * 1024 * 1024
 MAX_PAYLOAD_BYTES = 64 * 1024 * 1024
 MAX_MANIFEST_BYTES = 256 * 1024
 MAX_TRUSTED_ELF_BYTES = 10 * 1024 * 1024
+# A 10 MiB trusted ELF can legitimately contain more than 1024 sections after
+# section-splitting and link-time garbage collection.  Keep this independently
+# bounded so malformed inputs cannot force unbounded section-table parsing.
+MAX_TRUSTED_ELF_SECTIONS = 4096
 MAX_COMPRESSION_RATIO = 200
 MAX_SECTIONS = 512
 MAX_UI_FILES = 512
@@ -420,7 +424,7 @@ def validate_elf(elf: bytes) -> None:
     program_size, program_count = u16(42), u16(44)
     section_size, section_count, names_index = u16(46), u16(48), u16(50)
     if (program_size < 32 or not program_count or program_count > 128 or
-            section_size < 40 or not section_count or section_count > 1024 or
+            section_size < 40 or not section_count or section_count > MAX_TRUSTED_ELF_SECTIONS or
             names_index >= section_count or program_offset > len(elf) or
             program_count * program_size > len(elf) - program_offset or
             section_offset > len(elf) or section_count * section_size > len(elf) - section_offset):

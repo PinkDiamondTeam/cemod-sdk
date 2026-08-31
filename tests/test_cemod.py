@@ -149,24 +149,30 @@ def wps_image(metadata=b"name=SDK Test\0author=Test\0version=1.0\0license=MIT\0"
     return bytes(image)
 
 
-def elf_image():
+def elf_image(section_count=3):
     """Small valid CMB1 trusted-native ELF used by package-side validation."""
-    image = bytearray(0x300)
+    if section_count < 3:
+        raise ValueError("trusted ELF fixture needs at least three sections")
+    table_offset = 0x280
+    image = bytearray(max(0x300, table_offset + section_count * 40))
     names = b"\0.shstrtab\0.cemod.bootstrap\0"
     image[0:4] = b"\x7fELF"
     image[4:7] = b"\x01\x02\x01"
     struct.pack_into(">HHI", image, 16, 3, 20, 1)
-    struct.pack_into(">II", image, 28, 52, 0x280)
-    struct.pack_into(">HHHHHH", image, 40, 52, 32, 1, 40, 3, 1)
-    struct.pack_into(">8I", image, 52, 1, 0, 0x10000000, 0, len(image), 0x1000, 5, 0x1000)
+    struct.pack_into(">II", image, 28, 52, table_offset)
+    struct.pack_into(">HHHHHH", image, 40, 52, 32, 1, 40, section_count, 1)
+    memory_size = (len(image) + 0xfff) & ~0xfff
+    struct.pack_into(">8I", image, 52, 1, 0, 0x10000000, 0, len(image), memory_size, 5, 0x1000)
     image[0x100:0x100 + len(names)] = names
     bootstrap = 0x180
     struct.pack_into(">IHHI", image, bootstrap, 0x434D4231, 1, 24, 1)
     struct.pack_into(">6I", image, bootstrap + 12, 1, 0x10000120, 0x4e800421,
                      0xFFFFFFFF, 0x10000120, 0)
-    struct.pack_into(">10I", image, 0x280, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-    struct.pack_into(">10I", image, 0x2a8, 1, 3, 2, 0x10000000, 0x100, len(names), 0, 0, 1, 0)
-    struct.pack_into(">10I", image, 0x2d0, 11, 1, 2, 0x10000100, bootstrap, 36, 0, 0, 4, 0)
+    struct.pack_into(">10I", image, table_offset, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    struct.pack_into(">10I", image, table_offset + 40, 1, 3, 2, 0x10000000,
+                     0x100, len(names), 0, 0, 1, 0)
+    struct.pack_into(">10I", image, table_offset + 80, 11, 1, 2, 0x10000100,
+                     bootstrap, 36, 0, 0, 4, 0)
     return bytes(image)
 
 
@@ -435,6 +441,22 @@ class PackageTests(unittest.TestCase):
         broken[0] = 0
         with self.assertRaisesRegex(CemodError, "mod.elf"):
             validate_elf(bytes(broken))
+
+    def test_legacy_elf_section_table_limit_and_bounds(self):
+        # Production ELF builds can contain well over 1024 harmless section
+        # headers.  The parser accepts them only when the complete, bounded
+        # table is present in the ELF file.
+        validate_elf(elf_image(section_count=1226))
+
+        table_out_of_bounds = bytearray(elf_image())
+        struct.pack_into(">H", table_out_of_bounds, 48, 4096)
+        with self.assertRaisesRegex(CemodError, "tables are out of bounds"):
+            validate_elf(bytes(table_out_of_bounds))
+
+        excessive_count = bytearray(elf_image())
+        struct.pack_into(">H", excessive_count, 48, 0xffff)
+        with self.assertRaisesRegex(CemodError, "tables are out of bounds"):
+            validate_elf(bytes(excessive_count))
 
     def test_deterministic_package_bytes(self):
         manifest_path = self.root / "manifest.json"
