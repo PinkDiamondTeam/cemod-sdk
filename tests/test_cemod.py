@@ -238,6 +238,15 @@ class ManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(CemodError, "at most 256 MiB"):
             validate_manifest(value)
 
+    def test_microphone_permission(self):
+        value = manifest()
+        value["requested_permissions"] = ["microphone"]
+        self.assertEqual(validate_manifest(value), ("wups", "plugin.wps"))
+
+        value["requested_permissions"].append("microphone")
+        with self.assertRaisesRegex(CemodError, "requested_permissions is invalid"):
+            validate_manifest(value)
+
         value = manifest()
         value["memory"] = {"mem2_expansion_bytes": 4096}
         with self.assertRaisesRegex(CemodError, "package_version 3"):
